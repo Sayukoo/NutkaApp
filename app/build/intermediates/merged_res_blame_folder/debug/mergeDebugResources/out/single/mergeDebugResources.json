@@ -1,0 +1,34 @@
+[
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\font_figtree_semibold.ttf.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\font\\figtree_semibold.ttf"
+    },
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\mipmap-anydpi-v26\\ic_launcher.xml"
+    },
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\font_figtree_regular.ttf.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\font\\figtree_regular.ttf"
+    },
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\font_figtree_bold.ttf.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\font\\figtree_bold.ttf"
+    },
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\font_caprasimo_regular.ttf.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\font\\caprasimo_regular.ttf"
+    },
+    {
+        "merged": "com.nutka.app-debug-49:/xml_file_paths.xml.flat",
+        "source": "com.nutka.app-main-51:/xml/file_paths.xml"
+    },
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\mipmap-anydpi-v26\\ic_launcher_round.xml"
+    },
+    {
+        "merged": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-debug-49:\\drawable_ic_launcher_foreground.xml.flat",
+        "source": "C:\\Users\\Gamin\\.gradle\\daemon\\8.9\\com.nutka.app-main-51:\\drawable\\ic_launcher_foreground.xml"
+    }
+]
