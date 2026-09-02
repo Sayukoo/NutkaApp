@@ -47,6 +47,10 @@ class AudioRecorderManager(private val context: Context) {
         runCatching { if (Build.VERSION.SDK_INT >= 24) mediaRecorder?.resume() }
     }
 
+    fun getMaxAmplitude(): Int {
+        return runCatching { mediaRecorder?.maxAmplitude ?: 0 }.getOrDefault(0)
+    }
+
     /** Stops the recorder and returns the finished audio file (null if nothing was recording). */
     fun stop(): File? {
         val hadRecorder = mediaRecorder != null

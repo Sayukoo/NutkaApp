@@ -1,10 +1,10 @@
 {
     "logs": [
         {
-            "outputFile": "com.nutka.app-mergeDebugResources-47:/values-night-v8/values-night-v8.xml",
+            "outputFile": "com.nutka.app-mergeDebugResources-38:/values-night-v8/values-night-v8.xml",
             "map": [
                 {
-                    "source": "C:\\Users\\Gamin\\.gradle\\caches\\8.9\\transforms\\94978e302102e5c7b89982514ac465a9\\transformed\\core-splashscreen-1.0.1\\res\\values-night-v8\\values-night-v8.xml",
+                    "source": "C:\\Users\\kacku\\.gradle\\caches\\9.1.0\\transforms\\f74f05c93d7cdaa56dfc9f5d0cea35eb\\workspace\\transformed\\core-splashscreen-1.0.1\\res\\values-night-v8\\values-night-v8.xml",
                     "from": {
                         "startLines": "2",
                         "startColumns": "4",

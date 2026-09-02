@@ -13,14 +13,23 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.nutka.app.MainActivity
 import com.nutka.app.R
+import com.nutka.app.data.AppLog
 import com.nutka.app.data.AudioRecorderManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
+import kotlin.math.pow
 
 /**
  * Foreground service so recording — and the transcription upload that
@@ -44,11 +53,17 @@ class RecordingService : Service() {
     private var ticker: CountDownTimer? = null
     private var isForeground = false
 
+    private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
+    private var amplitudeJob: Job? = null
+
     private val _elapsedSec = MutableStateFlow(0)
     val elapsedSec: StateFlow<Int> = _elapsedSec.asStateFlow()
 
     private val _isPaused = MutableStateFlow(false)
     val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+
+    private val _audioLevel = MutableStateFlow(0f)
+    val audioLevel: StateFlow<Float> = _audioLevel.asStateFlow()
 
     private val _bookmarks = MutableStateFlow<List<Int>>(emptyList())
     val bookmarks: StateFlow<List<Int>> = _bookmarks.asStateFlow()
@@ -63,6 +78,7 @@ class RecordingService : Service() {
         _elapsedSec.value = 0
         _isPaused.value = false
         _bookmarks.value = emptyList()
+        _audioLevel.value = 0f
 
         promote("Nutka nagrywa", "Stuknij, aby wrócić do transkrypcji")
         val manager = AudioRecorderManager(this)
@@ -74,11 +90,13 @@ class RecordingService : Service() {
         }
         recorder = manager
         startTicker()
+        startAmplitudeMonitoring()
         return true
     }
 
     fun pauseRecording() {
         _isPaused.value = true
+        _audioLevel.value = 0f
         recorder?.pause()
         ticker?.cancel()
     }
@@ -100,6 +118,7 @@ class RecordingService : Service() {
      * service alive via [updateWork] and finishes it with [endWork].
      */
     fun stopRecording(): File? {
+        stopAmplitudeMonitoring()
         ticker?.cancel()
         val file = recorder?.stop()
         recorder = null
@@ -107,27 +126,105 @@ class RecordingService : Service() {
         return file
     }
 
+    /** Discards the recording session, deletes any file, and resets foreground state. */
+    fun cancelRecording() {
+        stopAmplitudeMonitoring()
+        ticker?.cancel()
+        val file = recorder?.stop()
+        recorder = null
+        file?.delete()
+        _elapsedSec.value = 0
+        _isPaused.value = false
+        _bookmarks.value = emptyList()
+        _audioLevel.value = 0f
+        endWork()
+    }
+
     /** Promotes (or keeps) this service in the foreground for a bounded background task. */
     fun beginWork(title: String, text: String) = promote(title, text)
 
-    fun updateWork(text: String) = promote("Nutka", text)
+    fun updateWork(text: String) {
+        runCatching {
+            val notification = buildNotification("Nutka", text)
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(NOTIFICATION_ID, notification)
+        }.onFailure { e ->
+            AppLog.e("Service", "Błąd aktualizacji powiadomienia", e)
+        }
+    }
 
     /** Ends the foreground session — only when nothing else needs it (e.g. not mid-recording). */
     fun endWork() {
         if (recorder != null) return
         isForeground = false
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.cancel(NOTIFICATION_ID)
+        }
+        runCatching { stopSelf() }
     }
 
+    private fun startAmplitudeMonitoring() {
+        amplitudeJob?.cancel()
+        amplitudeJob = serviceScope.launch {
+            while (isActive) {
+                if (!_isPaused.value && recorder != null) {
+                    val rawAmp = recorder?.getMaxAmplitude() ?: 0
+                    // rawAmp: 0..32767. Normalize with gentle exponential curve for responsive voice bounce
+                    val normalized = (rawAmp / 32767f).coerceIn(0f, 1f)
+                    val level = normalized.toDouble().pow(0.55).toFloat().coerceIn(0f, 1f)
+                    _audioLevel.value = level
+                } else {
+                    _audioLevel.value = 0f
+                }
+                delay(50)
+            }
+        }
+    }
+
+    private fun stopAmplitudeMonitoring() {
+        amplitudeJob?.cancel()
+        amplitudeJob = null
+        _audioLevel.value = 0f
+    }
+
+    /**
+     * Promotes this service to foreground. MUST always call startForeground()
+     * when reached via startForegroundService() — the previous version gated it
+     * on `recorder != null`, but startRecording() calls promote() *before*
+     * assigning the recorder, so startForeground() never ran and Android threw
+     * "Context.startForegroundService() did not then call Service.startForeground()"
+     * a few seconds later. If the typed promotion fails (e.g. an import started
+     * transcription without mic permission on API 34+), fall back to a plain
+     * notification so we still satisfy the start-service contract.
+     */
     private fun promote(title: String, text: String) {
         val notification = buildNotification(title, text)
         if (!isForeground) {
-            startForeground(NOTIFICATION_ID, notification)
-            isForeground = true
+            var promoted = runCatching {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            }.onFailure { e ->
+                AppLog.e("Service", "Błąd promowania do foreground — fallback na zwykłe powiadomienie", e)
+            }.isSuccess
+            if (!promoted) {
+                promoted = runCatching { startForeground(NOTIFICATION_ID, notification) }.isSuccess
+            }
+            if (promoted) isForeground = true else notifyQuietly(text)
         } else {
+            updateWork(text)
+        }
+    }
+
+    private fun notifyQuietly(text: String) {
+        runCatching {
             val manager = getSystemService(NotificationManager::class.java)
-            manager.notify(NOTIFICATION_ID, notification)
+            manager.notify(NOTIFICATION_ID, buildNotification("Nutka", text))
         }
     }
 
@@ -165,6 +262,8 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
+        stopAmplitudeMonitoring()
+        serviceScope.cancel()
         ticker?.cancel()
         recorder?.stop()
         super.onDestroy()

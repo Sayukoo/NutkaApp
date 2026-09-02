@@ -1,10 +1,10 @@
 {
     "logs": [
         {
-            "outputFile": "com.nutka.app-mergeDebugResources-47:/values-v30/values-v30.xml",
+            "outputFile": "com.nutka.app-mergeDebugResources-38:/values-v30/values-v30.xml",
             "map": [
                 {
-                    "source": "C:\\Users\\Gamin\\.gradle\\caches\\8.9\\transforms\\263c35bb4f4d0da69e7a934841b86bc2\\transformed\\material3-release\\res\\values-v30\\values-v30.xml",
+                    "source": "C:\\Users\\kacku\\.gradle\\caches\\9.1.0\\transforms\\10510a3d50b1e4ebdd89de17b113ebd4\\workspace\\transformed\\material3\\res\\values-v30\\values-v30.xml",
                     "from": {
                         "startLines": "2",
                         "startColumns": "4",

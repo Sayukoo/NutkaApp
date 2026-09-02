@@ -2,6 +2,7 @@ package com.nutka.app.ui.components
 
 import android.content.Context
 import android.media.MediaPlayer
+import android.media.PlaybackParams
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -25,7 +26,7 @@ class AudioPlayerState {
         if (loadedPath == path && mediaPlayer != null) return
         release()
         loadedPath = path
-        runCatching {
+        val prepared = runCatching {
             // Deliberately not using MediaPlayer().apply { } here: inside that
             // block `this` is the MediaPlayer, and it has its own read-only
             // `isPlaying` getter that would shadow this class's `var isPlaying`
@@ -42,6 +43,9 @@ class AudioPlayerState {
             mediaPlayer = mp
             durationMs = mp.duration
         }
+        // On failure forget the path so a future attempt with the same file can
+        // retry instead of silently bailing out forever.
+        prepared.onFailure { loadedPath = null }
     }
 
     fun toggle() {
@@ -60,6 +64,36 @@ class AudioPlayerState {
         val target = (fraction.coerceIn(0f, 1f) * durationMs).toInt()
         runCatching { mp.seekTo(target) }
         positionMs = target
+    }
+
+    fun seekToSec(sec: Int, autoPlay: Boolean = true) {
+        val mp = mediaPlayer ?: return
+        val target = (sec * 1000).coerceIn(0, durationMs.coerceAtLeast(0))
+        runCatching {
+            mp.seekTo(target)
+            if (autoPlay && !isPlaying) {
+                mp.start()
+                isPlaying = true
+            }
+        }
+        positionMs = target
+    }
+
+    /**
+     * Press-and-hold fast-forward: bumps playback to [speed]x while playing,
+     * without pausing. Deliberately does NOT pin pitch to normal — pitch-
+     * preserving time-stretch (setPitch(1f) alongside a non-1.0 speed) needs
+     * the framework to run a resampler that not every OEM MediaPlayer/audio
+     * HAL implementation supports, and silently fails (via the runCatching
+     * below) on ones that don't. A plain speed change with pitch following
+     * speed is universally supported — the brief chipmunk effect while held
+     * is an acceptable trade for the speed-up actually working.
+     */
+    fun setSpeed(speed: Float) {
+        val mp = mediaPlayer ?: return
+        if (!isPlaying) return
+        runCatching { mp.playbackParams = PlaybackParams().setSpeed(speed) }
+            .onFailure { com.nutka.app.data.AppLog.d("Player", "setSpeed($speed) nie powiodło się: ${it.message}") }
     }
 
     internal fun tick() {

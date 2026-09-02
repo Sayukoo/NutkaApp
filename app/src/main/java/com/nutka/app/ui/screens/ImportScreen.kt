@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -28,6 +28,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nutka.app.ui.components.HintTooltip
 import com.nutka.app.ui.theme.NutkaColors
 
 @Composable
@@ -38,11 +39,13 @@ fun ImportScreen(importing: Boolean, onBack: () -> Unit, onPickFile: () -> Unit)
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Box(
-                Modifier.size(34.dp).clip(CircleShape).background(NutkaColors.surface)
-                    .clickable(onClick = onBack),
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.Default.ArrowBack, contentDescription = "Wstecz", modifier = Modifier.size(20.dp)) }
+            HintTooltip("Wróć do nagrywania") {
+                Box(
+                    Modifier.size(34.dp).clip(CircleShape).background(NutkaColors.surface)
+                        .clickable(onClick = onBack),
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Wstecz", modifier = Modifier.size(20.dp)) }
+            }
             Text("Importuj plik", style = MaterialTheme.typography.titleLarge)
         }
 

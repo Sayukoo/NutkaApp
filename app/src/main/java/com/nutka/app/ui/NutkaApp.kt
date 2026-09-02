@@ -2,12 +2,23 @@ package com.nutka.app.ui
 
 import android.Manifest
 import android.content.ClipData
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,9 +33,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,6 +56,18 @@ import com.nutka.app.ui.screens.TranscriptScreen
 import com.nutka.app.ui.screens.formatDuration
 import com.nutka.app.ui.theme.NutkaColors
 
+/** Same as [ActivityResultContracts.OpenDocument] but opens straight into Downloads, since that's where imported recordings usually are. */
+private class OpenAudioDocument : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: Context, input: Array<String>): Intent {
+        val intent = super.createIntent(context, input)
+        intent.putExtra(
+            DocumentsContract.EXTRA_INITIAL_URI,
+            Uri.parse("content://com.android.externalstorage.documents/document/primary:Download")
+        )
+        return intent
+    }
+}
+
 @Composable
 fun NutkaApp() {
     val viewModel: NutkaViewModel = viewModel()
@@ -52,7 +78,7 @@ fun NutkaApp() {
         if (granted) viewModel.toggleRecord()
     }
     val notificationsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val filePickerLauncher = rememberLauncherForActivityResult(OpenAudioDocument()) { uri ->
         uri?.let { viewModel.importAudio(it) }
     }
 
@@ -71,7 +97,7 @@ fun NutkaApp() {
 
     Box(Modifier.fillMaxSize().background(NutkaColors.bg)) {
         Scaffold(
-            containerColor = NutkaColors.bg,
+            containerColor = Color.Transparent,
             bottomBar = {
                 if (state.screen == Screen.RECORD || state.screen == Screen.LIST || state.screen == Screen.SETTINGS) {
                     BottomNav(current = state.screen, onSelect = { screen ->
@@ -86,17 +112,31 @@ fun NutkaApp() {
             }
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
-                when (state.screen) {
+                AnimatedContent(
+                    targetState = state.screen,
+                    transitionSpec = {
+                        (fadeIn(tween(280)) + scaleIn(initialScale = 0.98f, animationSpec = tween(280)))
+                            .togetherWith(fadeOut(tween(180)) + scaleOut(targetScale = 0.985f, animationSpec = tween(180)))
+                    },
+                    label = "screenTransition"
+                ) {
+                    when (it) {
                     Screen.RECORD -> RecordScreen(
                         isRecording = state.isRecording,
                         isPaused = state.isPaused,
+                        audioLevel = state.audioLevel,
                         elapsedLabel = formatDuration(state.elapsedSec),
                         bookmarkCount = state.bookmarkCount,
                         backgroundRecordingEnabled = state.settings.backgroundRecording,
-                        onToggleRecord = { if (state.isRecording) viewModel.toggleRecord() else requestRecordToggle() },
+                        onStartRecord = { requestRecordToggle() },
+                        onStopRecord = { viewModel.toggleRecord() },
+                        onCancelRecord = { viewModel.cancelRecording() },
                         onTogglePause = viewModel::togglePause,
                         onAddBookmark = viewModel::addBookmark,
-                        onImport = viewModel::goImport
+                        onImport = {
+                            viewModel.goImport()
+                            filePickerLauncher.launch(arrayOf("audio/*"))
+                        }
                     )
 
                     Screen.LIST -> RecordingsListScreen(
@@ -113,6 +153,9 @@ fun NutkaApp() {
                             autoNotion = state.settings.autoNotion,
                             keyterms = state.settings.keyterms,
                             uploadPercent = state.uploadProgress?.takeIf { it.first == recording.id }?.second,
+                            initialSearchQuery = state.initialTranscriptSearch,
+                            initialSegmentIndex = state.initialTranscriptSegmentIndex,
+                            onConsumeInitialSearch = viewModel::consumeInitialSearch,
                             onBack = viewModel::goList,
                             onTitleChange = viewModel::setTitle,
                             onCopy = {
@@ -160,8 +203,8 @@ fun NutkaApp() {
                                     ExportKind.SUBTITLES -> {
                                         val audioPath = recording.filePath
                                         val srtFile = audioPath?.let { path ->
-                                            val f = java.io.File(path)
-                                            java.io.File(f.parentFile, f.nameWithoutExtension + ".srt")
+                                             val f = java.io.File(path)
+                                             java.io.File(f.parentFile, f.nameWithoutExtension + ".srt")
                                         }
                                         if (srtFile != null && srtFile.exists()) {
                                             shareFile(srtFile, "Eksportuj napisy")
@@ -178,6 +221,7 @@ fun NutkaApp() {
                             },
                             onSendToNotion = { viewModel.sendToNotion() },
                             onRetry = { viewModel.retryTranscription(recording.id) },
+                            onCancelTranscription = { viewModel.cancelTranscription(recording.id) },
                             onDelete = { viewModel.deleteRecording(recording.id) },
                             onStartEditSpeaker = viewModel::startEditSpeaker,
                             onNameDraftChange = viewModel::setNameDraft,
@@ -202,6 +246,7 @@ fun NutkaApp() {
                         onToggleIncludeSubtitles = viewModel::toggleIncludeSubtitles,
                         onToggleNoVerbatim = viewModel::toggleNoVerbatim,
                         onToggleAssignSpeakersFromLibrary = viewModel::toggleAssignSpeakersFromLibrary,
+                        onSetExpectedSpeakers = viewModel::setExpectedSpeakers,
                         onSetKeyterms = viewModel::setKeyterms,
                         onSetElevenLabsApiKey = viewModel::setElevenLabsApiKey,
                         onOpenLog = viewModel::goLog
@@ -219,24 +264,40 @@ fun NutkaApp() {
                         },
                         onClear = viewModel::clearLog
                     )
+                    }
                 }
             }
         }
 
         state.toast?.let { message ->
+            // Entrance animation keyed per message
+            val shown = remember(message) { androidx.compose.animation.core.Animatable(0f) }
+            LaunchedEffect(message) {
+                shown.animateTo(
+                    1f,
+                    androidx.compose.animation.core.spring(dampingRatio = 0.75f, stiffness = 380f)
+                )
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomCenter)
                     .windowInsetsPadding(WindowInsets.navigationBars)
-                    .padding(bottom = 84.dp)
+                    .padding(bottom = 88.dp)
             ) {
                 Text(
                     message,
                     color = NutkaColors.bg,
                     fontSize = 13.sp,
                     modifier = Modifier
+                        .graphicsLayer {
+                            alpha = shown.value
+                            val s = 0.9f + 0.1f * shown.value
+                            scaleX = s
+                            scaleY = s
+                        }
                         .clip(RoundedCornerShape(999.dp))
                         .background(NutkaColors.neutral900)
+                        .border(1.dp, NutkaColors.neutral700, RoundedCornerShape(999.dp))
                         .padding(horizontal = 18.dp, vertical = 10.dp)
                 )
             }

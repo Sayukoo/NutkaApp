@@ -16,21 +16,32 @@ import java.util.Locale
  * survives process death; capped so it can't grow without bound.
  */
 object AppLog {
-    private const val MAX_LINES = 800
-    private const val MAX_FILE_BYTES = 512 * 1024
+    private const val MAX_LINES = 1000
+    private const val MAX_FILE_BYTES = 1024 * 1024
 
     private val _lines = MutableStateFlow<List<String>>(emptyList())
     val lines: StateFlow<List<String>> = _lines
 
     private var logFile: File? = null
     private val format = SimpleDateFormat("dd.MM HH:mm:ss", Locale("pl"))
+    private var handlerInstalled = false
 
     fun init(context: Context) {
-        if (logFile != null) return
-        val file = File(context.applicationContext.filesDir, "app_log.txt")
-        logFile = file
-        _lines.value = runCatching { file.takeIf { it.exists() }?.readLines() }.getOrNull()?.takeLast(MAX_LINES) ?: emptyList()
-        d("App", "Log zainicjalizowany")
+        if (logFile == null) {
+            val file = File(context.applicationContext.filesDir, "app_log.txt")
+            logFile = file
+            _lines.value = runCatching { file.takeIf { it.exists() }?.readLines() }.getOrNull()?.takeLast(MAX_LINES) ?: emptyList()
+            d("App", "Log zainicjalizowany")
+        }
+
+        if (!handlerInstalled) {
+            handlerInstalled = true
+            val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+                e("CRASH", "Nieobsłużony wyjątek w wątku ${thread.name}: ${throwable.javaClass.simpleName} - ${throwable.message}\n${throwable.stackTraceToString()}")
+                defaultHandler?.uncaughtException(thread, throwable)
+            }
+        }
     }
 
     fun d(tag: String, message: String) {
@@ -44,6 +55,13 @@ object AppLog {
             }
             file.appendText(line + "\n")
         }
+    }
+
+    fun e(tag: String, message: String, throwable: Throwable? = null) {
+        val fullMsg = if (throwable != null) {
+            "$message: ${throwable.javaClass.simpleName} - ${throwable.message}\n${throwable.stackTraceToString()}"
+        } else message
+        d("BŁĄD-$tag", fullMsg)
     }
 
     fun clear() {

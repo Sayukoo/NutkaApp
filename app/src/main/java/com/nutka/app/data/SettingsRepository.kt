@@ -14,11 +14,12 @@ data class SettingsState(
 
     // Transcription options — carried over from the "Transcribe files" upload
     // dialog screenshot, applied to both live recordings and imports.
-    val primaryLanguage: String = "auto", // "auto" == Detect
+    val primaryLanguage: String = "pl", // "pl" == Polski (domyślny)
     val tagAudioEvents: Boolean = true,
     val includeSubtitles: Boolean = false,
     val noVerbatim: Boolean = false,
     val assignSpeakersFromLibrary: Boolean = false,
+    val expectedSpeakers: Int = 0, // 0 == let ElevenLabs auto-detect; otherwise a hint (num_speakers)
     val keyterms: List<String> = emptyList(),
 
     // ElevenLabs Speech-to-Text (optional). Empty == on-device recognizer only,
@@ -46,11 +47,12 @@ class SettingsRepository(context: Context) {
         notionDatabaseId = prefs.getString(KEY_NOTION_DB, "") ?: "",
         autoNotion = prefs.getBoolean(KEY_AUTO_NOTION, true),
         backgroundRecording = prefs.getBoolean(KEY_BG_RECORDING, true),
-        primaryLanguage = prefs.getString(KEY_LANGUAGE, "auto") ?: "auto",
+        primaryLanguage = prefs.getString(KEY_LANGUAGE, "pl") ?: "pl",
         tagAudioEvents = prefs.getBoolean(KEY_TAG_EVENTS, true),
         includeSubtitles = prefs.getBoolean(KEY_SUBTITLES, false),
         noVerbatim = prefs.getBoolean(KEY_NO_VERBATIM, false),
         assignSpeakersFromLibrary = prefs.getBoolean(KEY_SPEAKER_LIB, false),
+        expectedSpeakers = prefs.getInt(KEY_EXPECTED_SPEAKERS, 0),
         keyterms = (prefs.getString(KEY_KEYTERMS, "") ?: "")
             .split(",").map { it.trim() }.filter { it.isNotEmpty() },
         elevenLabsApiKey = prefs.getString(KEY_ELEVENLABS_KEY, "") ?: ""
@@ -65,6 +67,10 @@ class SettingsRepository(context: Context) {
     fun setIncludeSubtitles(v: Boolean) = putBoolean(KEY_SUBTITLES, v) { copy(includeSubtitles = v) }
     fun setNoVerbatim(v: Boolean) = putBoolean(KEY_NO_VERBATIM, v) { copy(noVerbatim = v) }
     fun setAssignSpeakersFromLibrary(v: Boolean) = putBoolean(KEY_SPEAKER_LIB, v) { copy(assignSpeakersFromLibrary = v) }
+    fun setExpectedSpeakers(v: Int) {
+        prefs.edit().putInt(KEY_EXPECTED_SPEAKERS, v).apply()
+        _state.update { it.copy(expectedSpeakers = v) }
+    }
     fun setKeyterms(v: List<String>) = putString(KEY_KEYTERMS, v.joinToString(",")) { copy(keyterms = v) }
     fun setElevenLabsApiKey(v: String) = putString(KEY_ELEVENLABS_KEY, v) { copy(elevenLabsApiKey = v) }
 
@@ -88,6 +94,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_SUBTITLES = "include_subtitles"
         private const val KEY_NO_VERBATIM = "no_verbatim"
         private const val KEY_SPEAKER_LIB = "assign_speakers_from_library"
+        private const val KEY_EXPECTED_SPEAKERS = "expected_speakers"
         private const val KEY_KEYTERMS = "keyterms"
         private const val KEY_ELEVENLABS_KEY = "elevenlabs_api_key"
     }

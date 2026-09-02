@@ -14,7 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.nutka.app.ui.components.HintTooltip
 import com.nutka.app.ui.theme.NutkaColors
 
 @Composable
@@ -37,21 +38,27 @@ fun LogScreen(lines: List<String>, onBack: () -> Unit, onShare: () -> Unit, onCl
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Box(
-                Modifier.size(34.dp).clip(CircleShape).background(NutkaColors.surface).clickable(onClick = onBack),
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.Default.ArrowBack, contentDescription = "Wstecz", modifier = Modifier.size(20.dp)) }
+            HintTooltip("Wróć do ustawień") {
+                Box(
+                    Modifier.size(34.dp).clip(CircleShape).background(NutkaColors.surface).clickable(onClick = onBack),
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Wstecz", modifier = Modifier.size(20.dp)) }
+            }
             Text("Dziennik zdarzeń", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            Icon(
-                Icons.Default.Share, contentDescription = "Udostępnij",
-                tint = NutkaColors.text.copy(alpha = 0.6f),
-                modifier = Modifier.size(19.dp).clickable(onClick = onShare)
-            )
-            Icon(
-                Icons.Default.Delete, contentDescription = "Wyczyść",
-                tint = NutkaColors.text.copy(alpha = 0.6f),
-                modifier = Modifier.padding(start = 16.dp).size(19.dp).clickable(onClick = onClear)
-            )
+            HintTooltip("Wyślij cały dziennik przez dowolną aplikację — przydatne przy zgłaszaniu problemu") {
+                Icon(
+                    Icons.Default.Share, contentDescription = "Udostępnij",
+                    tint = NutkaColors.text.copy(alpha = 0.6f),
+                    modifier = Modifier.size(34.dp, 34.dp).clickable(onClick = onShare).padding(7.dp)
+                )
+            }
+            HintTooltip("Usuń wszystkie wpisy z dziennika") {
+                Icon(
+                    Icons.Default.Delete, contentDescription = "Wyczyść",
+                    tint = NutkaColors.text.copy(alpha = 0.6f),
+                    modifier = Modifier.size(34.dp, 34.dp).clickable(onClick = onClear).padding(7.dp)
+                )
+            }
         }
 
         if (lines.isEmpty()) {

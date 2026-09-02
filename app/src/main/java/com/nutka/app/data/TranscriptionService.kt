@@ -58,41 +58,71 @@ private class ProgressRequestBody(
  *
  * Request fields sent (model_id, language_code, tag_audio_events, diarize,
  * num_speakers, timestamps_granularity, additional_formats) match
- * ElevenLabs' documented Scribe parameters. "keyterms" is sent too as a
- * best-effort biasing hint — if a given ElevenLabs API version doesn't
- * recognize it, multipart backends generally just ignore unknown fields
- * rather than reject the request. "No verbatim" has no API equivalent, so
- * it's applied client-side after the transcript comes back (filler-word
- * stripping in [stripFillers]).
+ * ElevenLabs' documented Scribe parameters. num_speakers is only sent when
+ * the user set an explicit expected speaker count in Settings — otherwise
+ * ElevenLabs auto-detects, which is usually fine but can under-split a
+ * conversation where one speaker is much quieter than the other; a known
+ * count is a strong hint that fixes that. "keyterms" is sent too as a
+ * best-effort biasing hint —
+ * if a given ElevenLabs API version doesn't recognize it, multipart backends
+ * generally just ignore unknown fields rather than reject the request. "No
+ * verbatim" has no API equivalent, so it's applied client-side after the
+ * transcript comes back (filler-word stripping in [stripFillers]).
+ *
+ * Diarization is always requested (`diarize=true`) — it's a baseline
+ * feature, not tied to [SettingsState.assignSpeakersFromLibrary], which is
+ * a separate "recognize known voices" toggle. Before this file also
+ * requires an explicit num_speakers hint to attempt diarization; that
+ * caused imported/recorded audio to silently come back with no speaker
+ * split whenever that unrelated toggle was off (the default).
+ *
+ * Before upload, the audio is run through [AudioNormalizer] to even out
+ * loud/quiet stretches (e.g. two speakers at different distances from the
+ * mic) — this both helps transcription accuracy and gives ElevenLabs'
+ * diarization a much better shot at telling speakers apart.
  */
 class ElevenLabsTranscriptionService {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS) // transcription can take a while
-        .writeTimeout(180, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS) // transcription can take up to a few minutes for long audio
+        .writeTimeout(300, TimeUnit.SECONDS)
         .build()
 
     fun transcribe(audioFile: File, settings: SettingsState, onProgress: (percent: Int) -> Unit = {}): TranscriptionResult {
         if (settings.elevenLabsApiKey.isBlank()) {
+            AppLog.d("ElevenLabs", "Brak klucza API ElevenLabs w Ustawieniach")
             return TranscriptionResult.Failure("Brak klucza API ElevenLabs w Ustawieniach")
         }
+
+        val startTime = System.currentTimeMillis()
+        val mediaType = when (audioFile.extension.lowercase()) {
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "ogg" -> "audio/ogg"
+            "flac" -> "audio/flac"
+            "aac" -> "audio/aac"
+            else -> "audio/mp4"
+        }.toMediaTypeOrNull()
+
+        AppLog.d("ElevenLabs", "Rozpoczęcie wysyłania: plik ${audioFile.name} (${audioFile.length()} B, typ: $mediaType), język: ${settings.primaryLanguage}")
+
         return runCatching {
             val bodyBuilder = MultipartBody.Builder().setType(MultipartBody.FORM)
                 .addFormDataPart(
                     "file", audioFile.name,
-                    audioFile.asRequestBody("audio/mp4".toMediaTypeOrNull())
+                    audioFile.asRequestBody(mediaType)
                 )
                 .addFormDataPart("model_id", "scribe_v1")
                 .addFormDataPart("tag_audio_events", settings.tagAudioEvents.toString())
-                .addFormDataPart("diarize", settings.assignSpeakersFromLibrary.toString())
+                .addFormDataPart("diarize", "true")
                 .addFormDataPart("timestamps_granularity", "word")
 
             if (settings.primaryLanguage != "auto") {
                 bodyBuilder.addFormDataPart("language_code", settings.primaryLanguage)
             }
-            if (settings.assignSpeakersFromLibrary) {
-                bodyBuilder.addFormDataPart("num_speakers", "2")
+            if (settings.expectedSpeakers > 0) {
+                bodyBuilder.addFormDataPart("num_speakers", settings.expectedSpeakers.toString())
             }
             if (settings.keyterms.isNotEmpty()) {
                 bodyBuilder.addFormDataPart("keyterms", settings.keyterms.joinToString(","))
@@ -101,22 +131,38 @@ class ElevenLabsTranscriptionService {
                 bodyBuilder.addFormDataPart("additional_formats", JSONArray().put(JSONObject().put("format", "srt")).toString())
             }
 
-            val progressBody = ProgressRequestBody(bodyBuilder.build(), onProgress)
+            val progressBody = ProgressRequestBody(bodyBuilder.build()) { pct ->
+                onProgress(pct)
+                if (pct == 100) {
+                    AppLog.d("ElevenLabs", "Plik wysłany (100%), oczekiwanie na transkrypcję z ElevenLabs...")
+                }
+            }
+
             val request = Request.Builder()
                 .url("https://api.elevenlabs.io/v1/speech-to-text")
-                .addHeader("xi-api-key", settings.elevenLabsApiKey)
+                .addHeader("xi-api-key", settings.elevenLabsApiKey.trim())
                 .post(progressBody)
                 .build()
 
+            AppLog.d("ElevenLabs", "Wysyłanie żądania POST do ElevenLabs Speech-to-Text API...")
+
             client.newCall(request).execute().use { response ->
+                val elapsed = System.currentTimeMillis() - startTime
                 val bodyStr = response.body?.string().orEmpty()
+                AppLog.d("ElevenLabs", "Odpowiedź HTTP ${response.code} w ${elapsed}ms")
+
                 if (!response.isSuccessful) {
-                    return TranscriptionResult.Failure("ElevenLabs zwrócił błąd ${response.code}: ${bodyStr.take(150)}")
+                    AppLog.e("ElevenLabs", "Błąd API ElevenLabs (HTTP ${response.code}): $bodyStr")
+                    return TranscriptionResult.Failure("ElevenLabs zwrócił błąd ${response.code}: ${bodyStr.take(200)}")
                 }
+
                 maybeSaveSubtitles(audioFile, bodyStr)
-                TranscriptionResult.Success(parseSegments(bodyStr, settings))
+                val segments = parseSegments(bodyStr, settings)
+                AppLog.d("ElevenLabs", "Sukces: wyodrębniono ${segments.size} segmentów transkrypcji")
+                TranscriptionResult.Success(segments)
             }
         }.getOrElse { e ->
+            AppLog.e("ElevenLabs", "Wyjątek podczas transkrypcji: ${e.message}", e)
             TranscriptionResult.Failure(e.message ?: "Nie udało się połączyć z ElevenLabs")
         }
     }

@@ -84,7 +84,11 @@ fun KeytermsField(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = {
                 val trimmed = draft.trim()
-                if (trimmed.isNotEmpty() && trimmed !in keyterms) onKeytermsChange(keyterms + trimmed)
+                // Compare case-insensitively — "Nutka" i "nutka" to ten sam termin
+                // dla silnika transkrypcji, więc nie dopuszczajmy duplikatów.
+                if (trimmed.isNotEmpty() && keyterms.none { it.equals(trimmed, ignoreCase = true) }) {
+                    onKeytermsChange(keyterms + trimmed)
+                }
                 draft = ""
             }),
             colors = OutlinedTextFieldDefaults.colors(

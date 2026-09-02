@@ -2,7 +2,8 @@ package com.nutka.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Tokens mirrored 1:1 from the Nutka design system (_ds/.../styles.css)
+// Tokens mirrored 1:1 from the Nutka design system (_ds/.../styles.css).
+// Flat 2D palette: solid fills + hairline borders, no gradients or glows.
 object NutkaColors {
     val bg = Color(0xFFF5EAD8)
     val surface = Color(0xFFEBDDC5)
@@ -41,3 +42,4 @@ object NutkaColors {
     val accent2_800 = Color(0xFF3D472B)
     val accent2_900 = Color(0xFF272E1B)
 }
+

@@ -23,13 +23,12 @@ import com.nutka.app.data.SettingsState
 import com.nutka.app.data.TranscriptionResult
 import com.nutka.app.service.RecordingService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -43,6 +42,7 @@ data class UiState(
     val isRecording: Boolean = false,
     val isPaused: Boolean = false,
     val elapsedSec: Int = 0,
+    val audioLevel: Float = 0f,
     val bookmarkCount: Int = 0,
     val recordings: List<Recording> = emptyList(),
     val activeRecordingId: String? = null,
@@ -52,7 +52,9 @@ data class UiState(
     val importing: Boolean = false,
     val settings: SettingsState = SettingsState(),
     val logLines: List<String> = emptyList(),
-    val uploadProgress: Pair<String, Int>? = null // (recordingId, percent) while uploading to ElevenLabs
+    val uploadProgress: Pair<String, Int>? = null, // (recordingId, percent) while uploading to ElevenLabs
+    val initialTranscriptSearch: String? = null,
+    val initialTranscriptSegmentIndex: Int? = null
 ) {
     val activeRecording: Recording? get() = recordings.firstOrNull { it.id == activeRecordingId }
 }
@@ -74,49 +76,76 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
     private val _importing = MutableStateFlow(false)
     private val _elapsedSec = MutableStateFlow(0)
     private val _isPaused = MutableStateFlow(false)
+    private val _audioLevel = MutableStateFlow(0f)
     private val _uploadProgress = MutableStateFlow<Pair<String, Int>?>(null)
+    private val _initialTranscriptSearch = MutableStateFlow<String?>(null)
+    private val _initialTranscriptSegmentIndex = MutableStateFlow<Int?>(null)
+    private val transcriptionJobs = mutableMapOf<String, Job>()
 
-    // Folded one field at a time (rather than one big N-ary combine) so this
-    // isn't capped by kotlinx.coroutines' typed combine() overloads (max 5).
-    private fun <T> Flow<UiState>.merge(other: Flow<T>, reducer: UiState.(T) -> UiState): Flow<UiState> =
-        combine(this, other) { state, value -> state.reducer(value) }
-
-    val uiState: StateFlow<UiState> = flowOf(UiState())
-        .merge(_screen) { copy(screen = it) }
-        .merge(_isRecording) { copy(isRecording = it) }
-        .merge(_isPaused) { copy(isPaused = it) }
-        .merge(_elapsedSec) { copy(elapsedSec = it) }
-        .merge(_bookmarkCount) { copy(bookmarkCount = it) }
-        .merge(recordingsRepo.recordings) { copy(recordings = it) }
-        .merge(_activeRecordingId) { copy(activeRecordingId = it) }
-        .merge(_editingSpeaker) { copy(editingSpeaker = it) }
-        .merge(_nameDraft) { copy(nameDraft = it) }
-        .merge(_toast) { copy(toast = it) }
-        .merge(_importing) { copy(importing = it) }
-        .merge(settingsRepo.state) { copy(settings = it) }
-        .merge(AppLog.lines) { copy(logLines = it) }
-        .merge(_uploadProgress) { copy(uploadProgress = it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState())
+    // A single flat combine() over all source flows — not 14 chained pairwise
+    // combines. Each pairwise .merge() used to be its own combine() stage, so
+    // e.g. a keystroke in a text field had to propagate through up to 14
+    // sequential coroutine dispatch hops before uiState (and therefore the
+    // TextField's controlled `value`) caught up; that lag is what made typed
+    // text visibly jump/lag behind the cursor. combine()'s vararg overload
+    // has no arity limit, so all flows can be combined in one hop.
+    val uiState: StateFlow<UiState> = combine(
+        _screen, _isRecording, _isPaused, _elapsedSec, _audioLevel, _bookmarkCount,
+        recordingsRepo.recordings, _activeRecordingId, _editingSpeaker, _nameDraft,
+        _toast, _importing, settingsRepo.state, AppLog.lines, _uploadProgress,
+        _initialTranscriptSearch, _initialTranscriptSegmentIndex
+    ) { values ->
+        @Suppress("UNCHECKED_CAST")
+        UiState(
+            screen = values[0] as Screen,
+            isRecording = values[1] as Boolean,
+            isPaused = values[2] as Boolean,
+            elapsedSec = values[3] as Int,
+            audioLevel = values[4] as Float,
+            bookmarkCount = values[5] as Int,
+            recordings = values[6] as List<Recording>,
+            activeRecordingId = values[7] as String?,
+            editingSpeaker = values[8] as String?,
+            nameDraft = values[9] as String,
+            toast = values[10] as String?,
+            importing = values[11] as Boolean,
+            settings = values[12] as SettingsState,
+            logLines = values[13] as List<String>,
+            uploadProgress = values[14] as Pair<String, Int>?,
+            initialTranscriptSearch = values[15] as String?,
+            initialTranscriptSegmentIndex = values[16] as Int?
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, UiState())
 
     // ---- Recording service binding -------------------------------------------------
 
     private var boundService: RecordingService? = null
+    private var serviceBindingJobs: List<Job> = emptyList()
+    private var pendingStartJob: Job? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val service = (binder as RecordingService.LocalBinder).service()
+            // A reconnect (e.g. after the process survived a service kill) must not
+            // stack collectors on top of the old ones — cancel them first or every
+            // rebind leaks another set of coroutines feeding stale values.
+            serviceBindingJobs.forEach { it.cancel() }
             boundService = service
-            viewModelScope.launch { service.elapsedSec.collect { _elapsedSec.value = it } }
-            viewModelScope.launch { service.isPaused.collect { _isPaused.value = it } }
-            viewModelScope.launch { service.bookmarks.collect { _bookmarkCount.value = it.size } }
-            viewModelScope.launch {
-                service.startFailed.collect { message ->
-                    AppLog.d("Recording", "Start nagrywania nie powiódł się: $message")
-                    _isRecording.value = false
-                    pendingStartId = null
-                    showToast("Nagrywanie nie powiodło się: $message")
+            serviceBindingJobs = listOf(
+                viewModelScope.launch { service.elapsedSec.collect { _elapsedSec.value = it } },
+                viewModelScope.launch { service.isPaused.collect { _isPaused.value = it } },
+                viewModelScope.launch { service.audioLevel.collect { _audioLevel.value = it } },
+                viewModelScope.launch { service.bookmarks.collect { _bookmarkCount.value = it.size } },
+                viewModelScope.launch {
+                    service.startFailed.collect { message ->
+                        AppLog.d("Recording", "Start nagrywania nie powiódł się: $message")
+                        _isRecording.value = false
+                        _audioLevel.value = 0f
+                        pendingStartId = null
+                        showToast("Nagrywanie nie powiodło się: $message")
+                    }
                 }
-            }
+            )
         }
         override fun onServiceDisconnected(name: ComponentName?) {
             boundService = null
@@ -141,10 +170,17 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
     fun goSettings() { _screen.value = Screen.SETTINGS; _editingSpeaker.value = null }
     fun goImport() { _screen.value = Screen.IMPORT; _importing.value = false }
     fun goLog() { _screen.value = Screen.LOG }
-    fun openRecording(id: String) {
+    fun openRecording(id: String, initialSearch: String? = null, initialSegmentIndex: Int? = null) {
         _activeRecordingId.value = id
         _editingSpeaker.value = null
+        _initialTranscriptSearch.value = initialSearch
+        _initialTranscriptSegmentIndex.value = initialSegmentIndex
         _screen.value = Screen.TRANSCRIPT
+    }
+
+    fun consumeInitialSearch() {
+        _initialTranscriptSearch.value = null
+        _initialTranscriptSegmentIndex.value = null
     }
 
     // ---- Recording ----------------------------------------------------------------
@@ -161,17 +197,31 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
             // start; retry once bound (see connection callback) via this small poll.
             // If the recorder itself fails to start, service.startFailed (collected
             // above) resets isRecording and surfaces the error — nothing here needs
-            // to check the return value.
-            viewModelScope.launch {
+            // to check the return value. The job is cancelled by cancelRecording(),
+            // otherwise a quick record→cancel tap would still spin up the mic.
+            pendingStartJob = viewModelScope.launch {
                 var attempts = 0
-                while (boundService == null && attempts < 50) { delay(20); attempts++ }
-                boundService?.startRecording(file)
+                while (boundService == null && attempts < 50 && pendingStartId != null) { delay(20); attempts++ }
+                if (pendingStartId == id) boundService?.startRecording(file)
+                else if (pendingStartId == null) runCatching { file.delete() }
             }
             _isRecording.value = true
         } else {
+            pendingStartJob?.cancel()
             val service = boundService
-            val bookmarkOffsets = service?.bookmarks?.value ?: emptyList()
-            val file = service?.stopRecording()
+            if (service == null) {
+                // Binder lost mid-session — don't fabricate a broken entry from a
+                // null file/stale timer; reset and tell the user what happened.
+                AppLog.e("Recording", "Stop nagrywania bez podłączonego serwisu — sesja porzucona")
+                pendingStartId = null
+                _isRecording.value = false
+                _elapsedSec.value = 0
+                _bookmarkCount.value = 0
+                showToast("Nie udało się zapisać nagrania")
+                return
+            }
+            val bookmarkOffsets = service.bookmarks.value
+            val file = service.stopRecording()
             val id = pendingStartId ?: return
             val durationSec = _elapsedSec.value
             val newRecording = Recording(
@@ -199,6 +249,25 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
         if (_isPaused.value) service.resumeRecording() else service.pauseRecording()
     }
 
+    fun cancelRecording() {
+        pendingStartJob?.cancel()
+        val service = boundService
+        service?.cancelRecording()
+        pendingStartId?.let { id ->
+            recordingsRepo.delete(id)
+            // The poll may not have reached startRecording() yet; make sure a fresh
+            // empty file created for this session doesn't linger on disk.
+            runCatching { recordingsRepo.newAudioFile(id).delete() }
+        }
+        pendingStartId = null
+        _isRecording.value = false
+        _isPaused.value = false
+        _audioLevel.value = 0f
+        _elapsedSec.value = 0
+        _bookmarkCount.value = 0
+        showToast("Anulowano nagranie")
+    }
+
     fun addBookmark() {
         boundService?.addBookmark()
         showToast("Dodano zakładkę")
@@ -221,10 +290,12 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
      * request dies with a "Broken pipe".
      */
     private fun finalizeTranscription(id: String, file: File?) {
-        viewModelScope.launch {
+        transcriptionJobs[id]?.cancel()
+        val job = viewModelScope.launch {
             val settings = settingsRepo.state.value
-            val elevenLabsConfigured = settings.elevenLabsApiKey.isNotBlank() && file != null
-            AppLog.d("Transcription", "$id: wysyłanie do ElevenLabs=${elevenLabsConfigured}, język=${settings.primaryLanguage}, diarize=${settings.assignSpeakersFromLibrary}, tagEvents=${settings.tagAudioEvents}")
+            val hasKey = settings.elevenLabsApiKey.isNotBlank()
+            val elevenLabsConfigured = hasKey && file != null
+            AppLog.d("Transcription", "$id: wysyłanie do ElevenLabs=${elevenLabsConfigured}, język=${settings.primaryLanguage}, tagEvents=${settings.tagAudioEvents}")
 
             if (elevenLabsConfigured) {
                 boundService?.beginWork("Nutka transkrybuje", "Przygotowywanie…")
@@ -238,7 +309,7 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
                         cloudTranscription.transcribe(file!!, settings) { percent ->
                             _uploadProgress.value = id to percent
                             val label = if (percent < 100) "Wysyłanie… $percent%" else "Przetwarzanie po stronie ElevenLabs…"
-                            boundService?.updateWork(label)
+                            runCatching { boundService?.updateWork(label) }
                         }
                     }) {
                         is TranscriptionResult.Success -> {
@@ -246,7 +317,7 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
                             result.segments
                         }
                         is TranscriptionResult.Failure -> {
-                            AppLog.d("Transcription", "$id: błąd ElevenLabs — ${result.message}")
+                            AppLog.e("Transcription", "$id: błąd ElevenLabs — ${result.message}")
                             recordingsRepo.update(id) {
                                 it.copy(status = RecordingStatus.ERROR, errorMessage = "Nagranie zapisane lokalnie. ${result.message}")
                             }
@@ -254,11 +325,16 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 } else emptyList()
-            } finally {
-                if (elevenLabsConfigured) {
-                    _uploadProgress.value = null
-                    boundService?.endWork()
+            } catch (e: Throwable) {
+                AppLog.e("Transcription", "$id: nieoczekiwany błąd podczas transkrypcji", e)
+                recordingsRepo.update(id) {
+                    it.copy(status = RecordingStatus.ERROR, errorMessage = "Błąd transkrypcji: ${e.message}")
                 }
+                return@launch
+            } finally {
+                // Only clear progress that still belongs to THIS recording — a
+                // concurrent second upload must not lose its indicator.
+                if (_uploadProgress.value?.first == id) _uploadProgress.value = null
             }
 
             if (segments.isNotEmpty()) {
@@ -267,13 +343,38 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
                     sendToNotion(id)
                 }
             } else {
-                val msg = if (!elevenLabsConfigured) {
-                    "Nagranie zapisane lokalnie. Dodaj klucz API ElevenLabs w Ustawieniach, aby je transkrybować"
-                } else "Nagranie zapisane lokalnie. ElevenLabs nie wykrył mowy w tym nagraniu"
+                val msg = when {
+                    !hasKey -> "Nagranie zapisane lokalnie. Dodaj klucz API ElevenLabs w Ustawieniach, aby je transkrybować"
+                    file == null -> "Nagranie bez pliku audio — nie można go transkrybować"
+                    else -> "Nagranie zapisane lokalnie. ElevenLabs nie wykrył mowy w tym nagraniu"
+                }
                 AppLog.d("Transcription", "$id: brak segmentów ($msg)")
                 recordingsRepo.update(id) { it.copy(status = RecordingStatus.ERROR, errorMessage = msg) }
             }
         }
+        transcriptionJobs[id] = job
+        job.invokeOnCompletion {
+            if (transcriptionJobs[id] == job) transcriptionJobs.remove(id)
+            maybeEndForegroundWork()
+        }
+    }
+
+    /** Drops the foreground promotion once nothing (recording, upload) needs it anymore. */
+    private fun maybeEndForegroundWork() {
+        if (!_isRecording.value && transcriptionJobs.isEmpty()) {
+            runCatching { boundService?.endWork() }
+        }
+    }
+
+    fun cancelTranscription(id: String) {
+        transcriptionJobs[id]?.cancel()
+        transcriptionJobs.remove(id)
+        if (_uploadProgress.value?.first == id) _uploadProgress.value = null
+        maybeEndForegroundWork()
+        recordingsRepo.update(id) {
+            it.copy(status = RecordingStatus.ERROR, errorMessage = "Transkrypcja została anulowana")
+        }
+        showToast("Anulowano transkrypcję")
     }
 
     fun retryTranscription(id: String) {
@@ -286,6 +387,9 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteRecording(id: String) {
         AppLog.d("Recording", "Usunięto nagranie $id")
+        transcriptionJobs[id]?.cancel()
+        transcriptionJobs.remove(id)
+        maybeEndForegroundWork()
         recordingsRepo.delete(id)
         if (_activeRecordingId.value == id) {
             _activeRecordingId.value = null
@@ -330,8 +434,14 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
                     FileOutputStream(dest).use { output -> input.copyTo(output) }
                 }
             }
+            // Live recordings get a real durationSec from the elapsed-time counter
+            // (see toggleRecord() above) — imports need to read it back from the
+            // file instead. Without this, durationSec stayed 0 and the player/
+            // waveform row in TranscriptScreen (gated on durationSec > 0) never
+            // showed up for imported audio.
+            val durationSec = readDurationSec(dest)
             val newRecording = Recording(
-                id = id, title = null, filePath = dest.absolutePath, durationSec = 0,
+                id = id, title = null, filePath = dest.absolutePath, durationSec = durationSec,
                 createdAtMillis = System.currentTimeMillis(), status = RecordingStatus.PROCESSING
             )
             recordingsRepo.upsert(newRecording)
@@ -342,6 +452,15 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
             }
             finalizeTranscription(id, dest)
         }
+    }
+
+    private fun readDurationSec(file: File): Int {
+        val retriever = android.media.MediaMetadataRetriever()
+        return runCatching {
+            retriever.setDataSource(file.absolutePath)
+            val ms = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+            (ms / 1000).toInt()
+        }.getOrDefault(0).also { runCatching { retriever.release() } }
     }
 
     // ---- Transcript editing -------------------------------------------------------
@@ -382,9 +501,17 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun showToast(message: String) {
+        // Token per show: without it, two identical messages in a row would let the
+        // first timer clear the second toast before its own delay elapsed.
+        val token = ++toastToken
         _toast.value = message
-        viewModelScope.launch { delay(1800); if (_toast.value == message) _toast.value = null }
+        viewModelScope.launch {
+            delay(1800)
+            if (_toast.value == message && token == toastToken) _toast.value = null
+        }
     }
+
+    private var toastToken = 0
 
     // ---- Settings ------------------------------------------------------------
 
@@ -397,6 +524,7 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleIncludeSubtitles() = settingsRepo.setIncludeSubtitles(!settingsRepo.state.value.includeSubtitles)
     fun toggleNoVerbatim() = settingsRepo.setNoVerbatim(!settingsRepo.state.value.noVerbatim)
     fun toggleAssignSpeakersFromLibrary() = settingsRepo.setAssignSpeakersFromLibrary(!settingsRepo.state.value.assignSpeakersFromLibrary)
+    fun setExpectedSpeakers(count: Int) = settingsRepo.setExpectedSpeakers(count)
     fun setKeyterms(v: List<String>) = settingsRepo.setKeyterms(v)
     fun setElevenLabsApiKey(v: String) = settingsRepo.setElevenLabsApiKey(v)
 
