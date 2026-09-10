@@ -2,84 +2,84 @@ package com.nutka.app.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.Spring
-import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.nutka.app.ui.theme.NutkaColors
 
 /**
- * Audio-level bars reflecting real-time voice input from the microphone.
- * Pure 2D: solid rounded sticks in one accent colour, dimmed while paused.
+ * The live voice meter: a scrolling column of sticks, one per microphone
+ * sample, newest on the right — the same read as a dictaphone's level trace.
+ * Speak louder and the sticks that arrive are taller; go quiet and they
+ * collapse to dots that keep drifting left, so the last few seconds of your
+ * voice are always visible as a shape rather than a single pulsing blob.
+ *
+ * [levels] is read *inside* the draw lambda on purpose: the service pushes a
+ * new sample every 33 ms, and reading the state here confines that to the draw
+ * phase — no recomposition of the record screen 30 times a second.
  */
 @Composable
-fun WaveformBars(
-    audioLevel: Float = 0f,
-    isPaused: Boolean = false,
+fun LiveWaveform(
+    levels: State<List<Float>>,
+    isPaused: Boolean,
+    modifier: Modifier = Modifier,
     color: Color = NutkaColors.accent,
-    modifier: Modifier = Modifier
+    barCount: Int = 52
 ) {
-    // Natural vocal frequency envelope (taller toward the centre)
-    val barWeights = listOf(0.38f, 0.58f, 0.78f, 0.94f, 1.00f, 0.92f, 0.84f, 0.64f, 0.44f)
-
     val activeColor by animateColorAsState(
         targetValue = if (isPaused) NutkaColors.neutral400 else color,
         animationSpec = tween(220),
         label = "waveformColor"
     )
+    val pausedDim by animateColorAsState(
+        targetValue = if (isPaused) NutkaColors.neutral300 else color.copy(alpha = 0.28f),
+        animationSpec = tween(220),
+        label = "waveformIdle"
+    )
 
-    Row(
-        modifier = modifier.height(46.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        barWeights.forEachIndexed { i, weight ->
-            val targetScale = when {
-                isPaused -> 0.12f
-                audioLevel <= 0.02f -> 0.16f + (i % 2) * 0.05f // resting breath
-                else -> (0.18f + (audioLevel * weight * 0.82f)).coerceIn(0.15f, 1f)
-            }
+    Canvas(modifier.fillMaxWidth().height(52.dp)) {
+        val samples = levels.value
+        val slot = size.width / barCount
+        val barWidth = (slot * 0.46f).coerceIn(2f, 7f)
+        val centerY = size.height / 2f
+        val maxHeight = size.height
 
-            val animatedScale by animateFloatAsState(
-                targetValue = targetScale,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow
-                ),
-                label = "barScale$i"
-            )
+        for (i in 0 until barCount) {
+            // Right-align the history so the newest sample is always the
+            // right-most stick and older ones scroll away to the left.
+            val level = samples.getOrElse(samples.size - barCount + i) { 0f }
+            val barHeight = (maxHeight * level).coerceAtLeast(barWidth)
+            val x = slot * i + slot / 2f
 
-            Box(
-                Modifier
-                    .width(5.dp)
-                    .height(42.dp)
-                    .scale(scaleX = 1f, scaleY = animatedScale)
-                    .clip(RoundedCornerShape(50))
-                    .background(activeColor)
+            // Older samples fade out slightly, which reads as motion even
+            // during a steady tone.
+            val age = if (barCount > 1) i.toFloat() / (barCount - 1) else 1f
+            val tint = if (level <= 0.001f) pausedDim else activeColor
+            drawLine(
+                color = tint.copy(alpha = tint.alpha * (0.35f + 0.65f * age)),
+                start = Offset(x, centerY - barHeight / 2f),
+                end = Offset(x, centerY + barHeight / 2f),
+                strokeWidth = barWidth,
+                cap = StrokeCap.Round
             )
         }
     }
@@ -87,64 +87,70 @@ fun WaveformBars(
 
 /**
  * Reactive pulse rings behind the record button while a session is live.
- * Flat 2D: thin outline circles drifting outward and fading, front one
- * swelling with the actual microphone level.
+ * Flat 2D: thin outline circles drifting outward and fading, both swelling
+ * with the actual microphone level.
+ *
+ * [audioLevel] is read inside [graphicsLayer] so a louder voice only re-runs
+ * the layer phase — never a recomposition.
  */
 @Composable
 fun PulseRing(
-    color: Color = NutkaColors.accent,
-    audioLevel: Float = 0f,
+    audioLevel: State<Float>,
+    modifier: Modifier = Modifier,
     isPaused: Boolean = false,
-    size: Dp = 120.dp,
-    modifier: Modifier = Modifier
+    color: Color = NutkaColors.accent,
+    size: Dp = 120.dp
 ) {
     if (isPaused) return
 
     val transition = rememberInfiniteTransition(label = "pulse")
 
-    @Composable
-    fun ring(delayFraction: Float): Pair<Float, Float> {
-        val scale by transition.animateFloat(
-            initialValue = 0.85f,
-            targetValue = 1.55f,
-            animationSpec = infiniteRepeatable(
-                tween(1700, delayMillis = (delayFraction * 1700).toInt(), easing = LinearEasing)
-            ),
-            label = "pulseScale$delayFraction"
-        )
-        val alpha by transition.animateFloat(
-            initialValue = 0.40f,
-            targetValue = 0f,
-            animationSpec = infiniteRepeatable(
-                tween(1700, delayMillis = (delayFraction * 1700).toInt(), easing = LinearEasing)
-            ),
-            label = "pulseAlpha$delayFraction"
-        )
-        return scale to alpha
-    }
-
-    val (scaleA, alphaA) = ring(0f)
-    val (scaleB, alphaB) = ring(0.5f)
-
-    val reactiveBoost = audioLevel * 0.22f
+    val scaleA by transition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.55f,
+        animationSpec = infiniteRepeatable(tween(1700, easing = LinearEasing)),
+        label = "pulseScaleA"
+    )
+    val alphaA by transition.animateFloat(
+        initialValue = 0.40f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(tween(1700, easing = LinearEasing)),
+        label = "pulseAlphaA"
+    )
+    val scaleB by transition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.55f,
+        animationSpec = infiniteRepeatable(tween(1700, delayMillis = 850, easing = LinearEasing)),
+        label = "pulseScaleB"
+    )
+    val alphaB by transition.animateFloat(
+        initialValue = 0.40f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(tween(1700, delayMillis = 850, easing = LinearEasing)),
+        label = "pulseAlphaB"
+    )
 
     Box(contentAlignment = Alignment.Center) {
         Box(
             modifier
                 .size(size)
-                .scale(scaleB + reactiveBoost)
-                .alpha(alphaB * 0.8f)
-                .clip(CircleShape)
-                .background(Color.Transparent)
+                .graphicsLayer {
+                    val boost = audioLevel.value * 0.24f
+                    scaleX = scaleB + boost
+                    scaleY = scaleB + boost
+                    alpha = alphaB * 0.8f
+                }
                 .border(1.dp, color, CircleShape)
         )
         Box(
             modifier
                 .size(size)
-                .scale(scaleA + reactiveBoost)
-                .alpha(alphaA)
-                .clip(CircleShape)
-                .background(Color.Transparent)
+                .graphicsLayer {
+                    val boost = audioLevel.value * 0.24f
+                    scaleX = scaleA + boost
+                    scaleY = scaleA + boost
+                    alpha = alphaA
+                }
                 .border(2.dp, color, CircleShape)
         )
     }

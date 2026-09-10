@@ -1,5 +1,12 @@
 package com.nutka.app.ui.screens
 
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Description
@@ -45,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -56,6 +65,8 @@ import com.nutka.app.ui.components.SettingIcon
 import com.nutka.app.ui.components.SettingsActionRow
 import com.nutka.app.ui.components.SettingsSectionLabel
 import com.nutka.app.ui.components.SettingsToggleRow
+import com.nutka.app.ui.components.Tag
+import com.nutka.app.ui.components.TagStyle
 import com.nutka.app.ui.theme.NutkaColors
 
 private val LANGUAGES = listOf(
@@ -135,6 +146,7 @@ fun SettingsScreen(
                 tooltip = "Kontynuuje nagrywanie przy zablokowanym ekranie i gdy przejdziesz do innej aplikacji. Nagranie jest chronione powiadomieniem na pierwszym planie, więc Android nie ubije go przy niskiej baterii."
             )
         }
+        item { BatteryOptimizationRow() }
 
         // ---- Transkrypcja --------------------------------------------------------
         item { SettingsSectionLabel("TRANSKRYPCJA") }
@@ -227,6 +239,58 @@ fun SettingsScreen(
             }
         }
     }
+}
+
+/**
+ * The one setting that decides whether a long recording actually survives.
+ *
+ * A microphone foreground service plus a wake lock is everything the platform
+ * itself asks for, but most OEM ROMs (Xiaomi, Samsung, Oppo, Huawei…) run an
+ * extra power manager on top that will still freeze or kill a backgrounded app
+ * after a while unless it is on the "unrestricted" list. Nothing in the app can
+ * opt itself out — only the user can, from the system dialog this row opens.
+ *
+ * The state is re-read when the user comes back from that dialog, so the tag
+ * flips to "Wyłączona" without needing to leave and re-enter Settings.
+ */
+@SuppressLint("BatteryLife")
+@Composable
+private fun BatteryOptimizationRow() {
+    val context = LocalContext.current
+    fun isExempt(): Boolean = runCatching {
+        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+    }.getOrDefault(false)
+
+    var exempt by remember { mutableStateOf(isExempt()) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        exempt = isExempt()
+    }
+
+    val requestExemption: () -> Unit = {
+        val direct = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:" + context.packageName)
+        )
+        val opened = runCatching { launcher.launch(direct) }.isSuccess
+        if (!opened) {
+            // Some ROMs hide the per-app dialog; fall back to the full list.
+            runCatching { launcher.launch(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }
+    }
+
+    SettingsActionRow(
+        title = "Optymalizacja baterii",
+        icon = Icons.Default.Bolt,
+        tooltip = "Android i nakładki producentów potrafią uśpić aplikację w tle i przerwać długie nagranie. " +
+            "Dodaj Nutkę do wyjątków, a nagrywanie będzie działać także przy wygaszonym ekranie i przez wiele godzin.",
+        onClick = if (exempt) null else requestExemption,
+        trailing = {
+            Tag(
+                text = if (exempt) "Wyłączona" else "Włącz wyjątek",
+                style = if (exempt) TagStyle.ACCENT2 else TagStyle.OUTLINE
+            )
+        }
+    )
 }
 
 // ---- Cards -------------------------------------------------------------------

@@ -128,12 +128,21 @@ fun TranscriptScreen(
     onNameDraftChange: (String) -> Unit,
     onCommitName: () -> Unit
 ) {
-    val player = rememberAudioPlayerState(recording.filePath)
+    val player = rememberAudioPlayerState(recording.filePath, recording.durationSec)
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
 
     var showExportMenu by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    // Which bubble opened the rename field. The ViewModel only tracks the
+    // *role* being renamed ("a"/"b"), and matching on that alone turned every
+    // single bubble of that speaker into a text field at once — a dozen inputs
+    // all bound to the same draft. Only the tapped one should become editable.
+    var editingSegmentIndex by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(editingSpeaker) {
+        if (editingSpeaker == null) editingSegmentIndex = null
+    }
 
     var isSearchOpen by remember { mutableStateOf(!initialSearchQuery.isNullOrBlank()) }
     var searchQuery by remember { mutableStateOf(initialSearchQuery ?: "") }
@@ -425,7 +434,13 @@ fun TranscriptScreen(
                     SpeakerChip(
                         name = recording.speakerNames[role] ?: role,
                         color = if (role == "a") NutkaColors.accent else NutkaColors.accent2,
-                        onClick = { onStartEditSpeaker(role) }
+                        onClick = {
+                            // Renaming from the chip: point the field at this
+                            // speaker's first bubble so exactly one opens.
+                            editingSegmentIndex =
+                                recording.segments.indexOfFirst { it.speaker == role }.takeIf { it >= 0 }
+                            onStartEditSpeaker(role)
+                        }
                     )
                 }
             }
@@ -611,11 +626,17 @@ fun TranscriptScreen(
                         searchQuery = trimmedSearch,
                         activeCharOffset = activeCharOffset,
                         isActive = (index == activeSegmentIndex && player.isPlaying),
-                        isEditing = editingSpeaker == seg.speaker,
+                        isEditing = editingSpeaker == seg.speaker && editingSegmentIndex == index,
                         nameDraft = nameDraft,
-                        onStartEdit = { onStartEditSpeaker(seg.speaker) },
+                        onStartEdit = {
+                            editingSegmentIndex = index
+                            onStartEditSpeaker(seg.speaker)
+                        },
                         onNameDraftChange = onNameDraftChange,
-                        onCommitName = onCommitName,
+                        onCommitName = {
+                            editingSegmentIndex = null
+                            onCommitName()
+                        },
                         onSeekToTime = {
                             player.seekToSec(seg.timeSec, autoPlay = true)
                             // If search is active, focus first match in this segment if present

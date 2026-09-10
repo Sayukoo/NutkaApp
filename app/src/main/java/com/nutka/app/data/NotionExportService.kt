@@ -27,6 +27,11 @@ class NotionExportService {
     private val jsonMedia = "application/json".toMediaType()
     private val notionVersion = "2022-06-28"
 
+    private companion object {
+        /** Hard limit on `children` per Notion API request. */
+        const val MAX_BLOCKS_PER_REQUEST = 100
+    }
+
     fun export(recording: Recording, settings: SettingsState): NotionExportResult {
         if (settings.notionToken.isBlank() || settings.notionDatabaseId.isBlank()) {
             return NotionExportResult.Failure("Skonfiguruj token integracji i ID bazy danych Notion w Ustawieniach")
@@ -36,13 +41,12 @@ class NotionExportService {
         val title = recording.title?.takeIf { it.isNotBlank() }
             ?: "Nagranie ${SimpleDateFormat("d MMM yyyy, HH:mm", Locale("pl")).format(Date(recording.createdAtMillis))}"
 
-        val children = JSONArray().apply {
-            if (recording.segments.isEmpty()) {
-                put(paragraphBlock("(Brak transkrypcji)"))
-            }
-            recording.segments.forEach { seg ->
+        val blocks: List<JSONObject> = if (recording.segments.isEmpty()) {
+            listOf(paragraphBlock("(Brak transkrypcji)"))
+        } else {
+            recording.segments.map { seg ->
                 val speakerName = recording.speakerNames[seg.speaker] ?: seg.speakerLabel ?: "Mówca"
-                put(paragraphBlock("$speakerName: ${seg.text}"))
+                paragraphBlock("$speakerName: ${seg.text}")
             }
         }
 
@@ -54,7 +58,10 @@ class NotionExportService {
                     JSONObject().put("text", JSONObject().put("content", title))
                 ))
             ))
-            put("children", children)
+            // Notion rejects a request carrying more than 100 children outright,
+            // so a transcript longer than 100 segments used to fail completely.
+            // The first 100 go with the page; the rest are appended afterwards.
+            put("children", blocks.take(MAX_BLOCKS_PER_REQUEST).fold(JSONArray()) { arr, b -> arr.put(b) })
         }
 
         val request = Request.Builder()
@@ -65,15 +72,63 @@ class NotionExportService {
             .build()
 
         return runCatching {
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    NotionExportResult.Success
-                } else {
-                    val err = response.body?.string().orEmpty()
-                    NotionExportResult.Failure("Notion API: ${response.code} $err".take(200))
+            val pageId = client.newCall(request).execute().use { response ->
+                val bodyStr = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    return@runCatching NotionExportResult.Failure(
+                        "Notion API: ${response.code} $bodyStr".take(200)
+                    )
                 }
+                JSONObject(bodyStr).optString("id").takeIf { it.isNotBlank() }
+            }
+
+            val remaining = blocks.drop(MAX_BLOCKS_PER_REQUEST)
+            if (remaining.isEmpty()) {
+                NotionExportResult.Success
+            } else if (pageId == null) {
+                NotionExportResult.Failure("Notion utworzył stronę, ale nie zwrócił jej ID — dopisano tylko pierwsze $MAX_BLOCKS_PER_REQUEST wypowiedzi")
+            } else {
+                appendRemainingBlocks(pageId, remaining, settings)
             }
         }.getOrElse { e -> NotionExportResult.Failure(e.message ?: "Nie udało się połączyć z Notion") }
+    }
+
+    /**
+     * Adds the rest of a long transcript to an already-created page, 100 blocks
+     * at a time. A failure part-way leaves a page with a partial transcript, so
+     * the message says so explicitly — retrying would create a second page
+     * rather than resume this one.
+     */
+    private fun appendRemainingBlocks(
+        pageId: String,
+        remaining: List<JSONObject>,
+        settings: SettingsState
+    ): NotionExportResult {
+        remaining.chunked(MAX_BLOCKS_PER_REQUEST).forEachIndexed { chunkIndex, chunk ->
+            val payload = JSONObject().put(
+                "children",
+                chunk.fold(JSONArray()) { arr, b -> arr.put(b) }
+            )
+            val request = Request.Builder()
+                .url("https://api.notion.com/v1/blocks/$pageId/children")
+                .addHeader("Authorization", "Bearer ${settings.notionToken}")
+                .addHeader("Notion-Version", notionVersion)
+                .patch(payload.toString().toRequestBody(jsonMedia))
+                .build()
+
+            val failure = client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) null
+                else "Notion API: ${response.code} ${response.body?.string().orEmpty()}".take(200)
+            }
+            if (failure != null) {
+                val written = MAX_BLOCKS_PER_REQUEST * (chunkIndex + 1)
+                AppLog.e("Notion", "Dopisywanie bloków przerwane po $written wypowiedziach: $failure")
+                return NotionExportResult.Failure(
+                    "Strona powstała, ale zapisano tylko pierwsze $written wypowiedzi. $failure"
+                )
+            }
+        }
+        return NotionExportResult.Success
     }
 
     private fun paragraphBlock(text: String): JSONObject = JSONObject().apply {

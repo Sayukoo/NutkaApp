@@ -37,6 +37,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,10 +53,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nutka.app.ui.components.HintTooltip
+import com.nutka.app.ui.components.LiveWaveform
 import com.nutka.app.ui.components.PulseRing
 import com.nutka.app.ui.components.Tag
 import com.nutka.app.ui.components.TagStyle
-import com.nutka.app.ui.components.WaveformBars
 import com.nutka.app.ui.theme.NutkaColors
 import com.nutka.app.ui.theme.NutkaTimerStyle
 
@@ -63,7 +64,12 @@ import com.nutka.app.ui.theme.NutkaTimerStyle
 fun RecordScreen(
     isRecording: Boolean,
     isPaused: Boolean,
-    audioLevel: Float,
+    // Passed as State, never as a plain Float: the mic level changes ~22x a
+    // second and only the meter itself should react to it. Reading .value
+    // deeper down (inside a draw/graphicsLayer lambda) keeps this whole screen
+    // out of the recomposition path.
+    audioLevel: State<Float>,
+    waveform: State<List<Float>>,
     elapsedLabel: String,
     bookmarkCount: Int,
     backgroundRecordingEnabled: Boolean,
@@ -131,12 +137,13 @@ fun RecordScreen(
 
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             Column(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(22.dp)
             ) {
-                Box(Modifier.height(46.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().height(52.dp), contentAlignment = Alignment.Center) {
                     if (isRecording) {
-                        WaveformBars(audioLevel = audioLevel, isPaused = isPaused)
+                        LiveWaveform(levels = waveform, isPaused = isPaused)
                     } else {
                         Text("Gotowa do nagrania", fontSize = 13.sp, color = NutkaColors.text.copy(alpha = 0.5f))
                     }

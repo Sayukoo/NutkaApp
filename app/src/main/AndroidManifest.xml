@@ -6,6 +6,21 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- The transcription upload keeps the same service in the foreground once
+         the mic is released; that phase is a data-sync foreground service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keeps the CPU running while recording with the screen off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Lets Settings offer the "ignore battery optimisations" prompt, which is
+         what stops aggressive OEM power managers from killing a long session. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Reading audio files out of the shared Downloads folder. Split by API
+         level: READ_MEDIA_AUDIO replaced the blanket storage permission in 33. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <uses-feature
         android:name="android.hardware.microphone"
@@ -31,10 +46,13 @@
             </intent-filter>
         </activity>
 
+        <!-- stopWithTask=false: swiping Nutka out of the recents list must not
+             end a recording that is still running. -->
         <service
             android:name=".service.RecordingService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:stopWithTask="false"
+            android:foregroundServiceType="microphone|dataSync" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

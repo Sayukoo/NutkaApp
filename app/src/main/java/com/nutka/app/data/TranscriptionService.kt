@@ -76,10 +76,11 @@ private class ProgressRequestBody(
  * caused imported/recorded audio to silently come back with no speaker
  * split whenever that unrelated toggle was off (the default).
  *
- * Before upload, the audio is run through [AudioNormalizer] to even out
- * loud/quiet stretches (e.g. two speakers at different distances from the
- * mic) — this both helps transcription accuracy and gives ElevenLabs'
- * diarization a much better shot at telling speakers apart.
+ * The file is uploaded exactly as recorded. [AudioNormalizer] exists and
+ * could even out loud/quiet stretches before sending, but it is deliberately
+ * not wired in: it decodes the whole recording to raw PCM in memory, which is
+ * a real OOM risk on the hour-long sessions this app is built for. This note
+ * used to claim normalization was applied — it never was.
  */
 class ElevenLabsTranscriptionService {
 

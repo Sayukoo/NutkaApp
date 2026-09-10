@@ -12,6 +12,11 @@ data class SettingsState(
     val autoNotion: Boolean = true,
     val backgroundRecording: Boolean = true,
 
+    // Watch the phone's Downloads folder and transcribe anything new that lands
+    // there. Off by default on purpose: every auto-import spends ElevenLabs
+    // credit, so opting in is the user's call, not a default.
+    val autoImportDownloads: Boolean = false,
+
     // Transcription options — carried over from the "Transcribe files" upload
     // dialog screenshot, applied to both live recordings and imports.
     val primaryLanguage: String = "pl", // "pl" == Polski (domyślny)
@@ -47,6 +52,7 @@ class SettingsRepository(context: Context) {
         notionDatabaseId = prefs.getString(KEY_NOTION_DB, "") ?: "",
         autoNotion = prefs.getBoolean(KEY_AUTO_NOTION, true),
         backgroundRecording = prefs.getBoolean(KEY_BG_RECORDING, true),
+        autoImportDownloads = prefs.getBoolean(KEY_AUTO_IMPORT_DOWNLOADS, false),
         primaryLanguage = prefs.getString(KEY_LANGUAGE, "pl") ?: "pl",
         tagAudioEvents = prefs.getBoolean(KEY_TAG_EVENTS, true),
         includeSubtitles = prefs.getBoolean(KEY_SUBTITLES, false),
@@ -62,6 +68,24 @@ class SettingsRepository(context: Context) {
     fun setNotionDatabaseId(v: String) = putString(KEY_NOTION_DB, v) { copy(notionDatabaseId = v) }
     fun setAutoNotion(v: Boolean) = putBoolean(KEY_AUTO_NOTION, v) { copy(autoNotion = v) }
     fun setBackgroundRecording(v: Boolean) = putBoolean(KEY_BG_RECORDING, v) { copy(backgroundRecording = v) }
+    fun setAutoImportDownloads(v: Boolean) = putBoolean(KEY_AUTO_IMPORT_DOWNLOADS, v) { copy(autoImportDownloads = v) }
+
+    /**
+     * MediaStore ids of Downloads entries already pulled into the library.
+     *
+     * This is what stops the same file being transcribed twice — and, when
+     * auto-import is switched on, it is seeded with everything already in the
+     * folder so enabling the toggle doesn't upload the user's whole Downloads
+     * history in one go. Capped so it can't grow without bound.
+     */
+    fun importedDownloadIds(): Set<String> =
+        prefs.getStringSet(KEY_IMPORTED_DOWNLOADS, emptySet()) ?: emptySet()
+
+    fun rememberImportedDownloads(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val merged = (importedDownloadIds() + ids).toList().takeLast(MAX_REMEMBERED_DOWNLOADS).toSet()
+        prefs.edit().putStringSet(KEY_IMPORTED_DOWNLOADS, merged).apply()
+    }
     fun setPrimaryLanguage(v: String) = putString(KEY_LANGUAGE, v) { copy(primaryLanguage = v) }
     fun setTagAudioEvents(v: Boolean) = putBoolean(KEY_TAG_EVENTS, v) { copy(tagAudioEvents = v) }
     fun setIncludeSubtitles(v: Boolean) = putBoolean(KEY_SUBTITLES, v) { copy(includeSubtitles = v) }
@@ -71,7 +95,15 @@ class SettingsRepository(context: Context) {
         prefs.edit().putInt(KEY_EXPECTED_SPEAKERS, v).apply()
         _state.update { it.copy(expectedSpeakers = v) }
     }
-    fun setKeyterms(v: List<String>) = putString(KEY_KEYTERMS, v.joinToString(",")) { copy(keyterms = v) }
+    /**
+     * Keyterms are stored as one comma-joined string, so a term containing a
+     * comma would come back split in two on the next read. Strip them on the
+     * way in — a keyterm is a word or phrase, never a list.
+     */
+    fun setKeyterms(v: List<String>) {
+        val cleaned = v.map { it.replace(",", " ").trim() }.filter { it.isNotEmpty() }.distinct()
+        putString(KEY_KEYTERMS, cleaned.joinToString(",")) { copy(keyterms = cleaned) }
+    }
     fun setElevenLabsApiKey(v: String) = putString(KEY_ELEVENLABS_KEY, v) { copy(elevenLabsApiKey = v) }
 
     private inline fun putString(key: String, value: String, crossinline reducer: SettingsState.() -> SettingsState) {
@@ -89,6 +121,9 @@ class SettingsRepository(context: Context) {
         private const val KEY_NOTION_DB = "notion_database_id"
         private const val KEY_AUTO_NOTION = "auto_notion"
         private const val KEY_BG_RECORDING = "background_recording"
+        private const val KEY_AUTO_IMPORT_DOWNLOADS = "auto_import_downloads"
+        private const val KEY_IMPORTED_DOWNLOADS = "imported_download_ids"
+        private const val MAX_REMEMBERED_DOWNLOADS = 500
         private const val KEY_LANGUAGE = "primary_language"
         private const val KEY_TAG_EVENTS = "tag_audio_events"
         private const val KEY_SUBTITLES = "include_subtitles"

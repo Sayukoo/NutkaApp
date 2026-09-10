@@ -1,0 +1,33 @@
+# Built application files
+*.apk
+*.aab
+# But keep the root pre-built release APKs for easy download:
+!nutka.apk
+!nutka-release.apk
+
+# Gradle files
+.gradle/
+build/
+app/build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log files
+*.log
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+.navigation/
+
+# Kotlin
+.kotlin/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# AI assistant temp folders
+.claude/
+.opencode/

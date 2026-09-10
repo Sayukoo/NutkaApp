@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nutka.app.NutkaViewModel
 import com.nutka.app.Screen
+import com.nutka.app.data.DownloadsAudioScanner
 import com.nutka.app.ui.components.BottomNav
 import com.nutka.app.ui.screens.ExportKind
 import com.nutka.app.ui.screens.ImportScreen
@@ -74,10 +75,22 @@ fun NutkaApp() {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
+    // Collected here but deliberately never read during composition — the
+    // State objects are handed straight to the meter, which reads them in its
+    // draw phase. That keeps a ~22 Hz microphone signal from recomposing the
+    // whole app on every sample.
+    val audioLevel = viewModel.audioLevel.collectAsState()
+    val waveform = viewModel.waveform.collectAsState()
+
     val recordAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) viewModel.toggleRecord()
+        else viewModel.showToast("Bez dostępu do mikrofonu nie mogę nagrywać")
     }
     val notificationsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    val storageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        viewModel.refreshDownloads()
+        if (!granted) viewModel.showToast("Bez dostępu do plików nie pokażę folderu Pobrane")
+    }
     val filePickerLauncher = rememberLauncherForActivityResult(OpenAudioDocument()) { uri ->
         uri?.let { viewModel.importAudio(it) }
     }
@@ -124,7 +137,8 @@ fun NutkaApp() {
                     Screen.RECORD -> RecordScreen(
                         isRecording = state.isRecording,
                         isPaused = state.isPaused,
-                        audioLevel = state.audioLevel,
+                        audioLevel = audioLevel,
+                        waveform = waveform,
                         elapsedLabel = formatDuration(state.elapsedSec),
                         bookmarkCount = state.bookmarkCount,
                         backgroundRecordingEnabled = state.settings.backgroundRecording,
@@ -133,10 +147,11 @@ fun NutkaApp() {
                         onCancelRecord = { viewModel.cancelRecording() },
                         onTogglePause = viewModel::togglePause,
                         onAddBookmark = viewModel::addBookmark,
-                        onImport = {
-                            viewModel.goImport()
-                            filePickerLauncher.launch(arrayOf("audio/*"))
-                        }
+                        // Opens the import screen rather than jumping straight
+                        // into the system picker: the Downloads list there is
+                        // the faster route to the files that actually arrive
+                        // from other apps.
+                        onImport = viewModel::goImport
                     )
 
                     Screen.LIST -> RecordingsListScreen(
@@ -191,7 +206,17 @@ fun NutkaApp() {
                                                 context, "${context.packageName}.fileprovider", audioFile
                                             )
                                             val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                                type = "audio/mp4"
+                                                // Derived from the actual container: recordings are
+                                                // AAC/ADTS (.aac) where the device supports it, and
+                                                // imports keep their source extension.
+                                                type = when (audioFile.extension.lowercase()) {
+                                                    "aac" -> "audio/aac"
+                                                    "mp3" -> "audio/mpeg"
+                                                    "wav" -> "audio/wav"
+                                                    "ogg" -> "audio/ogg"
+                                                    "flac" -> "audio/flac"
+                                                    else -> "audio/mp4"
+                                                }
                                                 putExtra(Intent.EXTRA_STREAM, uri)
                                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                             }
@@ -231,8 +256,15 @@ fun NutkaApp() {
 
                     Screen.IMPORT -> ImportScreen(
                         importing = state.importing,
+                        downloads = state.downloads,
+                        permissionGranted = state.downloadsPermissionGranted,
+                        autoImport = state.settings.autoImportDownloads,
                         onBack = viewModel::goRecord,
-                        onPickFile = { filePickerLauncher.launch(arrayOf("audio/*")) }
+                        onPickFile = { filePickerLauncher.launch(arrayOf("audio/*")) },
+                        onGrantPermission = { storageLauncher.launch(DownloadsAudioScanner.requiredPermission) },
+                        onRefresh = viewModel::refreshDownloads,
+                        onImportDownload = viewModel::importFromDownloads,
+                        onToggleAutoImport = viewModel::toggleAutoImportDownloads
                     )
 
                     Screen.SETTINGS -> SettingsScreen(

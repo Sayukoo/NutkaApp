@@ -22,7 +22,14 @@ class AudioPlayerState {
     private var mediaPlayer: MediaPlayer? = null
     private var loadedPath: String? = null
 
-    fun load(path: String) {
+    /**
+     * @param fallbackDurationMs used when the container carries no duration of
+     *   its own. Recordings are written as a raw AAC/ADTS stream so that a
+     *   killed process can't destroy them, and such a stream has no header to
+     *   read a length from — without this the seek bar would sit at zero and
+     *   refuse to scrub. The recorded length is known anyway, so pass it in.
+     */
+    fun load(path: String, fallbackDurationMs: Int = 0) {
         if (loadedPath == path && mediaPlayer != null) return
         release()
         loadedPath = path
@@ -41,7 +48,8 @@ class AudioPlayerState {
             }
             mp.prepare()
             mediaPlayer = mp
-            durationMs = mp.duration
+            durationMs = runCatching { mp.duration }.getOrDefault(0)
+                .takeIf { it > 0 } ?: fallbackDurationMs
         }
         // On failure forget the path so a future attempt with the same file can
         // retry instead of silently bailing out forever.
@@ -112,12 +120,12 @@ class AudioPlayerState {
 }
 
 @Composable
-fun rememberAudioPlayerState(filePath: String?): AudioPlayerState {
+fun rememberAudioPlayerState(filePath: String?, fallbackDurationSec: Int = 0): AudioPlayerState {
     val context: Context = LocalContext.current
     val state = remember { AudioPlayerState() }
 
-    LaunchedEffect(filePath) {
-        if (!filePath.isNullOrBlank()) state.load(filePath)
+    LaunchedEffect(filePath, fallbackDurationSec) {
+        if (!filePath.isNullOrBlank()) state.load(filePath, fallbackDurationSec * 1000)
     }
     LaunchedEffect(state.isPlaying) {
         while (state.isPlaying) {

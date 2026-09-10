@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -15,7 +16,7 @@ import java.io.File
  * private storage. No Room/SQLite — the dataset is small (voice memos, not
  * a large corpus) so a flat file keeps the dependency surface minimal.
  */
-class RecordingsRepository(context: Context) {
+class RecordingsRepository private constructor(context: Context) {
 
     private val appContext = context.applicationContext
     private val storeFile = File(appContext.filesDir, "recordings.json")
@@ -26,18 +27,36 @@ class RecordingsRepository(context: Context) {
     private val _recordings = MutableStateFlow(loadFromDisk())
     val recordings: StateFlow<List<Recording>> = _recordings
 
-    fun newAudioFile(id: String): File = File(audioDir, "$id.m4a")
+    fun newAudioFile(id: String, extension: String = "m4a"): File =
+        File(audioDir, "$id.${extension.trim('.').ifBlank { "m4a" }}")
 
+    /** Any audio file already on disk for [id], whatever container it ended up in. */
+    fun audioFileFor(id: String): File? =
+        audioDir.listFiles()?.firstOrNull { it.nameWithoutExtension == id && it.extension != "srt" }
+
+    /** Removes every on-disk artefact for [id] (audio in any container + its .srt). */
+    fun deleteAudioFor(id: String) {
+        audioDir.listFiles()?.filter { it.nameWithoutExtension == id }?.forEach { runCatching { it.delete() } }
+    }
+
+    // All three mutators go through StateFlow.update {}, which retries on a
+    // compare-and-set miss. A plain `value = value.map { … }` is a
+    // read-modify-write, and the recording service now writes from its own
+    // background thread while the ViewModel updates statuses on the main one —
+    // two of those interleaving would silently drop whichever landed first,
+    // i.e. lose a just-finished recording.
     fun upsert(recording: Recording) {
-        _recordings.value = _recordings.value
-            .filterNot { it.id == recording.id }
-            .let { listOf(recording) + it }
-            .sortedByDescending { it.createdAtMillis }
+        _recordings.update { current ->
+            (listOf(recording) + current.filterNot { it.id == recording.id })
+                .sortedByDescending { it.createdAtMillis }
+        }
         persist()
     }
 
     fun update(id: String, transform: (Recording) -> Recording) {
-        _recordings.value = _recordings.value.map { if (it.id == id) transform(it) else it }
+        _recordings.update { current ->
+            current.map { if (it.id == id) transform(it) else it }
+        }
         persist()
     }
 
@@ -49,7 +68,7 @@ class RecordingsRepository(context: Context) {
             audio.delete()
             File(audio.parentFile, audio.nameWithoutExtension + ".srt").delete()
         }
-        _recordings.value = _recordings.value.filterNot { it.id == id }
+        _recordings.update { current -> current.filterNot { it.id == id } }
         persist()
     }
 
@@ -124,5 +143,22 @@ class RecordingsRepository(context: Context) {
             speakerNames = names,
             errorMessage = o.optString("errorMessage", null.toString()).takeIf { o.has("errorMessage") && !o.isNull("errorMessage") }
         )
+    }
+
+    companion object {
+        @Volatile private var instance: RecordingsRepository? = null
+
+        /**
+         * One shared instance per process. The recording service and the
+         * ViewModel both read and write the library — with two instances each
+         * would hold its own in-memory [StateFlow] over the same JSON file, so
+         * a recording saved by the service (e.g. stopped from the notification
+         * while the UI was gone) would be invisible to the UI until a restart,
+         * and whichever persisted last would clobber the other's entries.
+         */
+        fun get(context: Context): RecordingsRepository =
+            instance ?: synchronized(this) {
+                instance ?: RecordingsRepository(context).also { instance = it }
+            }
     }
 }
