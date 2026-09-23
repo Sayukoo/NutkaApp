@@ -17,6 +17,13 @@ data class SettingsState(
     // credit, so opting in is the user's call, not a default.
     val autoImportDownloads: Boolean = false,
 
+    // Phone-call recording. Off by default, and even when on the default is to
+    // ASK per call (a notification with a "Nagraj" button) rather than record
+    // every call: the other side has to know they are being recorded, and that
+    // is true for some calls, not all of them.
+    val callRecording: Boolean = false,
+    val autoRecordCalls: Boolean = false,
+
     // Transcription options — carried over from the "Transcribe files" upload
     // dialog screenshot, applied to both live recordings and imports.
     val primaryLanguage: String = "pl", // "pl" == Polski (domyślny)
@@ -53,6 +60,8 @@ class SettingsRepository(context: Context) {
         autoNotion = prefs.getBoolean(KEY_AUTO_NOTION, true),
         backgroundRecording = prefs.getBoolean(KEY_BG_RECORDING, true),
         autoImportDownloads = prefs.getBoolean(KEY_AUTO_IMPORT_DOWNLOADS, false),
+        callRecording = prefs.getBoolean(KEY_CALL_RECORDING, false),
+        autoRecordCalls = prefs.getBoolean(KEY_AUTO_RECORD_CALLS, false),
         primaryLanguage = prefs.getString(KEY_LANGUAGE, "pl") ?: "pl",
         tagAudioEvents = prefs.getBoolean(KEY_TAG_EVENTS, true),
         includeSubtitles = prefs.getBoolean(KEY_SUBTITLES, false),
@@ -69,6 +78,8 @@ class SettingsRepository(context: Context) {
     fun setAutoNotion(v: Boolean) = putBoolean(KEY_AUTO_NOTION, v) { copy(autoNotion = v) }
     fun setBackgroundRecording(v: Boolean) = putBoolean(KEY_BG_RECORDING, v) { copy(backgroundRecording = v) }
     fun setAutoImportDownloads(v: Boolean) = putBoolean(KEY_AUTO_IMPORT_DOWNLOADS, v) { copy(autoImportDownloads = v) }
+    fun setCallRecording(v: Boolean) = putBoolean(KEY_CALL_RECORDING, v) { copy(callRecording = v) }
+    fun setAutoRecordCalls(v: Boolean) = putBoolean(KEY_AUTO_RECORD_CALLS, v) { copy(autoRecordCalls = v) }
 
     /**
      * MediaStore ids of Downloads entries already pulled into the library.
@@ -123,6 +134,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_BG_RECORDING = "background_recording"
         private const val KEY_AUTO_IMPORT_DOWNLOADS = "auto_import_downloads"
         private const val KEY_IMPORTED_DOWNLOADS = "imported_download_ids"
+        private const val KEY_CALL_RECORDING = "call_recording"
+        private const val KEY_AUTO_RECORD_CALLS = "auto_record_calls"
         private const val MAX_REMEMBERED_DOWNLOADS = 500
         private const val KEY_LANGUAGE = "primary_language"
         private const val KEY_TAG_EVENTS = "tag_audio_events"

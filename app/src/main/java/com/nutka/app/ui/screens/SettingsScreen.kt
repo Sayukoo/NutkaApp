@@ -1,7 +1,10 @@
 package com.nutka.app.ui.screens
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
@@ -24,8 +27,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.filled.Accessibility
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ExpandMore
@@ -33,6 +38,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -59,6 +65,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nutka.app.data.SettingsState
+import com.nutka.app.service.CallRecordingAccessibilityService
 import com.nutka.app.ui.components.HintTooltip
 import com.nutka.app.ui.components.KeytermsField
 import com.nutka.app.ui.components.SettingIcon
@@ -87,6 +94,9 @@ fun SettingsScreen(
     onDisconnectNotion: () -> Unit,
     onToggleAutoNotion: () -> Unit,
     onToggleBackgroundRecording: () -> Unit,
+    onSetCallRecording: (Boolean) -> Unit,
+    onToggleAutoRecordCalls: () -> Unit,
+    onShowMessage: (String) -> Unit,
     onSetPrimaryLanguage: (String) -> Unit,
     onToggleTagAudioEvents: () -> Unit,
     onToggleIncludeSubtitles: () -> Unit,
@@ -147,6 +157,18 @@ fun SettingsScreen(
             )
         }
         item { BatteryOptimizationRow() }
+
+        // ---- Rozmowy telefoniczne --------------------------------------------------
+        item { SettingsSectionLabel("ROZMOWY TELEFONICZNE") }
+        item {
+            CallRecordingCard(
+                enabled = settings.callRecording,
+                autoRecord = settings.autoRecordCalls,
+                onSetEnabled = onSetCallRecording,
+                onToggleAutoRecord = onToggleAutoRecordCalls,
+                onShowMessage = onShowMessage
+            )
+        }
 
         // ---- Transkrypcja --------------------------------------------------------
         item { SettingsSectionLabel("TRANSKRYPCJA") }
@@ -294,6 +316,96 @@ private fun BatteryOptimizationRow() {
 }
 
 // ---- Cards -------------------------------------------------------------------
+
+private fun Context.hasPermission(permission: String): Boolean =
+    checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
+/**
+ * Phone-call recording needs three things from the user, and this card walks
+ * through them in order: the phone-state + microphone permissions (asked when
+ * the switch is turned on), the accessibility service (a system screen only
+ * the user can flip — Android's condition for hearing the mic mid-call), and
+ * the speaker during the call itself, which nothing in the app can switch on.
+ */
+@Composable
+private fun CallRecordingCard(
+    enabled: Boolean,
+    autoRecord: Boolean,
+    onSetEnabled: (Boolean) -> Unit,
+    onToggleAutoRecord: () -> Unit,
+    onShowMessage: (String) -> Unit
+) {
+    val context = LocalContext.current
+    fun serviceOn(): Boolean = runCatching { CallRecordingAccessibilityService.isEnabled(context) }.getOrDefault(false)
+
+    var serviceEnabled by remember { mutableStateOf(serviceOn()) }
+    val accessibilityLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        serviceEnabled = serviceOn()
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        val granted = context.hasPermission(Manifest.permission.READ_PHONE_STATE) &&
+            context.hasPermission(Manifest.permission.RECORD_AUDIO)
+        if (granted) onSetEnabled(true)
+        else onShowMessage("Bez dostępu do stanu telefonu i mikrofonu nie nagram rozmowy")
+    }
+
+    val enable: () -> Unit = {
+        val missing = listOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.RECORD_AUDIO)
+            .filterNot { context.hasPermission(it) }
+        if (missing.isEmpty()) onSetEnabled(true) else permissionLauncher.launch(missing.toTypedArray())
+    }
+
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(NutkaColors.surface)
+    ) {
+        SettingsToggleRow(
+            title = "Nagrywanie rozmów",
+            checked = enabled,
+            onCheckedChange = { on -> if (on) enable() else onSetEnabled(false) },
+            icon = Icons.Default.Call,
+            tooltip = "Nagrywa rozmowy telefoniczne, w których bierzesz udział, i transkrybuje je przez ElevenLabs jak zwykłe nagranie. Rozmówca musi wiedzieć, że rozmowa jest nagrywana."
+        )
+        if (enabled) {
+            HorizontalDivider(color = NutkaColors.divider, thickness = 1.dp)
+            SettingsActionRow(
+                title = "Usługa dostępności",
+                icon = Icons.Default.Accessibility,
+                tooltip = "Android wpuszcza mikrofon w trakcie rozmowy tylko do usług dostępności — bez niej nagranie rozmowy jest ciszą. " +
+                    "Usługa Nutki nie czyta ekranu; w ustawieniach wybierz „Nutka — nagrywanie rozmów” i włącz.",
+                onClick = { runCatching { accessibilityLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) } },
+                trailing = {
+                    Tag(
+                        text = if (serviceEnabled) "Włączona" else "Włącz",
+                        style = if (serviceEnabled) TagStyle.ACCENT2 else TagStyle.OUTLINE
+                    )
+                }
+            )
+            HorizontalDivider(color = NutkaColors.divider, thickness = 1.dp)
+            SettingsToggleRow(
+                title = "Nagrywaj każdą rozmowę",
+                checked = autoRecord,
+                onCheckedChange = { onToggleAutoRecord() },
+                icon = Icons.Default.PhoneInTalk,
+                tooltip = "Wyłączone: przy każdej rozmowie pojawia się powiadomienie „Nagraj” i nagrywasz tylko te, na które rozmówca się zgodził. " +
+                    "Włączone: każda rozmowa nagrywa się sama, także z osobami, które o tym nie wiedzą."
+            )
+            HorizontalDivider(color = NutkaColors.divider, thickness = 1.dp)
+            Text(
+                buildString {
+                    append("W trakcie rozmowy włącz głośnik. Android nie daje aplikacjom dźwięku ze słuchawki, ")
+                    append("więc głos rozmówcy nagrywa się tylko przez mikrofon — z głośnika.")
+                    if (!serviceEnabled) {
+                        append("\n\nPrzełącznik Nutki w ustawieniach dostępności jest wyszarzony? ")
+                        append("Ustawienia → Aplikacje → Nutka → ⋮ → „Zezwól na ustawienia z ograniczonym dostępem”, potem spróbuj ponownie.")
+                    }
+                },
+                fontSize = 11.5.sp,
+                color = NutkaColors.text.copy(alpha = 0.55f),
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+            )
+        }
+    }
+}
 
 @Composable
 private fun NotionCard(

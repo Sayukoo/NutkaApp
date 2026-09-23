@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import android.media.MediaRecorder
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -54,6 +57,11 @@ import kotlin.math.log10
  * upload that follows ([beginWork]/[updateWork]/[endWork]) — without it
  * Android suspends the app sockets once backgrounded and the ElevenLabs
  * request dies mid-flight with a "Broken pipe".
+ *
+ * Phone calls run through the same session machinery ([ACTION_RECORD_CALL] /
+ * [ACTION_CALL_ENDED], sent by [CallRecordingAccessibilityService]); they only
+ * differ in the audio source and in a monitor that warns when the call is
+ * off speaker or the capture is being silenced.
  */
 class RecordingService : Service() {
 
@@ -73,6 +81,7 @@ class RecordingService : Service() {
     private var isForeground = false
     private var foregroundType = TYPE_NONE
     private var isDestroying = false
+    private var callMonitorJob: Job? = null
 
     // ---- Session bookkeeping (monotonic clock, immune to wall-clock changes) ----
     private var sessionId: String? = null
@@ -80,6 +89,11 @@ class RecordingService : Service() {
     private var sessionStartedAtWallClock = 0L
     private var pausedTotalMs = 0L
     private var pauseStartedAtElapsed = 0L
+    private var isCallSession = false
+    /** Last time the recorder reported any signal at all — a call captured as pure zeros has been silenced. */
+    @Volatile private var lastSoundAtElapsed = 0L
+    /** Shown instead of the normal notification text while a call is being recorded badly. */
+    @Volatile private var callWarning: String? = null
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
@@ -131,6 +145,10 @@ class RecordingService : Service() {
             ACTION_PAUSE -> pauseRecording()
             ACTION_RESUME -> resumeRecording()
             ACTION_DISCARD -> cancelRecording()
+            ACTION_RECORD_CALL -> startCallRecording()
+            // Only ends a call session: a dictation the user started by hand
+            // during a call is theirs to stop.
+            ACTION_CALL_ENDED -> if (isCallSession) stopRecording()
         }
         if (intent == null && !_isRecording.value) {
             // Restarted by the system after a process kill. Everything worth
@@ -143,8 +161,31 @@ class RecordingService : Service() {
 
     // ---- Session control -------------------------------------------------------
 
+    /**
+     * Starts recording the ongoing phone call. Reached through
+     * startForegroundService(), so every path must promote to the foreground
+     * before returning.
+     */
+    private fun startCallRecording() {
+        CallRecordingAccessibilityService.cancelRecordPrompt(this)
+        if (_isRecording.value) {
+            // Already in the foreground (a dictation, or the prompt tapped
+            // twice), which satisfies the startForegroundService() contract.
+            AppLog.d("Rozmowy", "Nagrywanie już trwa — pomijam start rozmowy")
+            return
+        }
+        if (!CallRecordingAccessibilityService.callInProgress) {
+            // The prompt was tapped just after hanging up.
+            AppLog.d("Rozmowy", "Rozmowa już się zakończyła — nie nagrywam")
+            promote(TYPE_DATA, getString(R.string.app_name), "Rozmowa już się zakończyła")
+            endWork()
+            return
+        }
+        startRecording("r" + System.currentTimeMillis(), phoneCall = true)
+    }
+
     /** Returns true if the recorder actually started. */
-    fun startRecording(id: String): Boolean {
+    fun startRecording(id: String, phoneCall: Boolean = false): Boolean {
         if (_isRecording.value) return true
 
         pausedTotalMs = 0L
@@ -157,10 +198,11 @@ class RecordingService : Service() {
 
         // Must happen before anything that can fail: the process was launched
         // with startForegroundService() and Android gives us ~5s to promote.
-        promote(TYPE_MIC, getString(R.string.app_name), "Nagrywanie…")
+        promote(TYPE_MIC, getString(R.string.app_name), if (phoneCall) "Nagrywanie rozmowy…" else "Nagrywanie…")
 
         val manager = AudioRecorderManager(this)
-        val file = runCatching { manager.start(repo.audioDir, id) }.getOrElse { e ->
+        val source = if (phoneCall) MediaRecorder.AudioSource.VOICE_RECOGNITION else MediaRecorder.AudioSource.MIC
+        val file = runCatching { manager.start(repo.audioDir, id, source) }.getOrElse { e ->
             AppLog.e("Recording", "Start nagrywania $id nie powiódł się", e)
             _startFailed.tryEmit(e.message ?: "Nie udało się uruchomić mikrofonu")
             endWork()
@@ -171,13 +213,17 @@ class RecordingService : Service() {
         sessionId = id
         sessionStartedAtElapsed = SystemClock.elapsedRealtime()
         sessionStartedAtWallClock = System.currentTimeMillis()
+        isCallSession = phoneCall
+        callSessionActive = phoneCall
+        lastSoundAtElapsed = sessionStartedAtElapsed
         _isRecording.value = true
-        persistSession(id, file)
+        persistSession(id, file, phoneCall)
         acquireWakeLock()
         startTicker()
         startAmplitudeMonitoring()
+        if (phoneCall) startCallMonitor()
         updateNotification()
-        AppLog.d("Recording", "Start nagrywania $id -> ${file.name}")
+        AppLog.d("Recording", "Start nagrywania ${if (phoneCall) "rozmowy " else ""}$id -> ${file.name}")
         return true
     }
 
@@ -197,6 +243,7 @@ class RecordingService : Service() {
             pauseStartedAtElapsed = 0L
         }
         _isPaused.value = false
+        lastSoundAtElapsed = SystemClock.elapsedRealtime()
         recorder?.resume()
         updateNotification()
     }
@@ -224,7 +271,9 @@ class RecordingService : Service() {
         val durationSec = (elapsedMs() / 1000L).toInt()
         val bookmarkOffsets = _bookmarks.value
         val startedAt = sessionStartedAtWallClock.takeIf { it > 0L } ?: System.currentTimeMillis()
+        val phoneCall = isCallSession
 
+        stopCallMonitor()
         stopAmplitudeMonitoring()
         stopTicker()
         val file = recorder?.stop()
@@ -248,12 +297,13 @@ class RecordingService : Service() {
         repo.upsert(
             Recording(
                 id = id,
-                title = null,
+                title = if (phoneCall) CALL_TITLE else null,
                 filePath = file.absolutePath,
                 durationSec = durationSec.coerceAtLeast(1),
                 createdAtMillis = startedAt,
                 status = RecordingStatus.PROCESSING,
-                bookmarks = bookmarkOffsets
+                bookmarks = bookmarkOffsets,
+                isPhoneCall = phoneCall
             )
         )
         AppLog.d("Recording", "Zapisano $id — ${durationSec}s, plik=${file.name}, rozmiar=${file.length()}B")
@@ -286,6 +336,7 @@ class RecordingService : Service() {
     /** Discards the session, deletes the audio, and drops the foreground promotion. */
     fun cancelRecording() {
         val id = sessionId
+        stopCallMonitor()
         stopAmplitudeMonitoring()
         stopTicker()
         recorder?.stop()
@@ -371,7 +422,9 @@ class RecordingService : Service() {
             val history = ArrayDeque<Float>()
             var smoothed = 0f
             while (isActive) {
-                val level = if (_isPaused.value) 0f else levelFor(recorder?.getMaxAmplitude() ?: 0)
+                val raw = if (_isPaused.value) 0 else recorder?.getMaxAmplitude() ?: 0
+                if (raw > 0) lastSoundAtElapsed = SystemClock.elapsedRealtime()
+                val level = levelFor(raw)
 
                 // Fast attack, slow release: the meter jumps the instant you
                 // speak up and settles back gently, the way a dictaphone does.
@@ -406,6 +459,57 @@ class RecordingService : Service() {
         return ((db - MIN_DB) / -MIN_DB).toFloat().coerceIn(0f, 1f)
     }
 
+    // ---- Phone call monitor ----------------------------------------------------
+
+    /**
+     * Surfaces the two ways a call recording fails silently, while the user
+     * can still do something about it:
+     * - the call is on the earpiece, so the mic only hears the user (no app
+     *   can move the call to the speaker — Telecom owns that route);
+     * - the capture delivers exact digital zeros, which is how Android
+     *   silences a recorder it refuses during a call (accessibility service
+     *   off, or a vendor policy that ignores the exemption).
+     */
+    private fun startCallMonitor() {
+        callMonitorJob?.cancel()
+        callMonitorJob = serviceScope.launch {
+            while (isActive) {
+                val warning = when {
+                    _isPaused.value -> null
+                    SystemClock.elapsedRealtime() - lastSoundAtElapsed >= SILENCE_WARNING_MS ->
+                        "Mikrofon nagrywa ciszę — sprawdź, czy usługa dostępności Nutki jest włączona"
+                    !isSpeakerOn() -> "Włącz głośnik — inaczej głos rozmówcy się nie nagra"
+                    else -> null
+                }
+                if (warning != callWarning) {
+                    callWarning = warning
+                    AppLog.d("Rozmowy", warning ?: "Nagrywanie rozmowy działa poprawnie")
+                    updateNotification()
+                }
+                delay(CALL_MONITOR_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopCallMonitor() {
+        callMonitorJob?.cancel()
+        callMonitorJob = null
+        callWarning = null
+    }
+
+    /** Whether the call audio currently plays through the loudspeaker. Unknown counts as yes — no false alarms. */
+    private fun isSpeakerOn(): Boolean {
+        val audio = getSystemService(AudioManager::class.java) ?: return true
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= 31) {
+                audio.communicationDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            } else {
+                @Suppress("DEPRECATION")
+                audio.isSpeakerphoneOn
+            }
+        }.getOrDefault(true)
+    }
+
     // ---- Wake lock -------------------------------------------------------------
 
     /**
@@ -433,18 +537,21 @@ class RecordingService : Service() {
 
     private fun sessionPrefs() = getSharedPreferences("nutka_session", Context.MODE_PRIVATE)
 
-    private fun persistSession(id: String, file: File) {
+    private fun persistSession(id: String, file: File, phoneCall: Boolean) {
         runCatching {
             sessionPrefs().edit()
                 .putString(KEY_SESSION_ID, id)
                 .putString(KEY_SESSION_FILE, file.absolutePath)
                 .putLong(KEY_SESSION_STARTED, sessionStartedAtWallClock)
+                .putBoolean(KEY_SESSION_CALL, phoneCall)
                 .apply()
         }
     }
 
     private fun clearSession() {
         sessionId = null
+        isCallSession = false
+        callSessionActive = false
         sessionStartedAtElapsed = 0L
         sessionStartedAtWallClock = 0L
         pausedTotalMs = 0L
@@ -463,6 +570,7 @@ class RecordingService : Service() {
         val id = prefs.getString(KEY_SESSION_ID, null) ?: return
         val path = prefs.getString(KEY_SESSION_FILE, null)
         val startedAt = prefs.getLong(KEY_SESSION_STARTED, System.currentTimeMillis())
+        val phoneCall = prefs.getBoolean(KEY_SESSION_CALL, false)
         runCatching { prefs.edit().clear().apply() }
 
         val file = path?.let(::File)?.takeIf { it.exists() } ?: repo.audioFileFor(id)
@@ -477,11 +585,12 @@ class RecordingService : Service() {
         repo.upsert(
             Recording(
                 id = id,
-                title = null,
+                title = if (phoneCall) CALL_TITLE else null,
                 filePath = file.absolutePath,
                 durationSec = durationSec,
                 createdAtMillis = startedAt,
-                status = RecordingStatus.PROCESSING
+                status = RecordingStatus.PROCESSING,
+                isPhoneCall = phoneCall
             )
         )
         AppLog.d("Recording", "Odzyskano przerwane nagranie $id (${durationSec}s, ${file.length()}B)")
@@ -566,6 +675,7 @@ class RecordingService : Service() {
         val paused = _isPaused.value
         val body = text ?: when {
             paused -> "Wstrzymano · ${formatClock(_elapsedSec.value)}"
+            recording && isCallSession -> callWarning ?: "Nagrywanie rozmowy"
             recording -> "Nagrywanie w toku"
             else -> "Pracuję w tle"
         }
@@ -573,6 +683,8 @@ class RecordingService : Service() {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(body)
+            // Call warnings are longer than one line; don't truncate the fix.
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(openApp)
             .setOngoing(true)
@@ -639,6 +751,7 @@ class RecordingService : Service() {
         // Last chance to keep whatever was recorded: save it rather than
         // dropping the session on the floor.
         if (_isRecording.value) runCatching { stopRecording() }
+        stopCallMonitor()
         stopAmplitudeMonitoring()
         stopTicker()
         idleShutdownJob?.cancel()
@@ -660,6 +773,22 @@ class RecordingService : Service() {
         const val ACTION_PAUSE = "com.nutka.app.action.PAUSE"
         const val ACTION_RESUME = "com.nutka.app.action.RESUME"
         const val ACTION_DISCARD = "com.nutka.app.action.DISCARD"
+        const val ACTION_RECORD_CALL = "com.nutka.app.action.RECORD_CALL"
+        const val ACTION_CALL_ENDED = "com.nutka.app.action.CALL_ENDED"
+
+        private const val CALL_TITLE = "Rozmowa telefoniczna"
+
+        /**
+         * True while a phone-call session is recording — lets the call
+         * detector send [ACTION_CALL_ENDED] only when there is something to
+         * stop, instead of spinning this service up on every hang-up.
+         */
+        @Volatile
+        var callSessionActive: Boolean = false
+            private set
+
+        fun recordCallIntent(context: Context): Intent =
+            Intent(context, RecordingService::class.java).setAction(ACTION_RECORD_CALL)
 
         private const val TYPE_NONE = 0
         // FOREGROUND_SERVICE_TYPE_MICROPHONE only exists from API 30 — API 29
@@ -686,5 +815,10 @@ class RecordingService : Service() {
         private const val KEY_SESSION_ID = "session_id"
         private const val KEY_SESSION_FILE = "session_file"
         private const val KEY_SESSION_STARTED = "session_started"
+        private const val KEY_SESSION_CALL = "session_call"
+        private const val CALL_MONITOR_INTERVAL_MS = 1_000L
+        // Real microphones never deliver exact zeros for this long; a
+        // silenced capture delivers nothing else.
+        private const val SILENCE_WARNING_MS = 8_000L
     }
 }

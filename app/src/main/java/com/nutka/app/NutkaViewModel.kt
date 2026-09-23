@@ -364,6 +364,8 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun toggleBackgroundRecording() = settingsRepo.setBackgroundRecording(!settingsRepo.state.value.backgroundRecording)
+    fun setCallRecording(enabled: Boolean) = settingsRepo.setCallRecording(enabled)
+    fun toggleAutoRecordCalls() = settingsRepo.setAutoRecordCalls(!settingsRepo.state.value.autoRecordCalls)
 
     // ---- Transcription --------------------------------------------------------
 
@@ -381,7 +383,13 @@ class NutkaViewModel(app: Application) : AndroidViewModel(app) {
     private fun finalizeTranscription(id: String, file: File?) {
         transcriptionJobs[id]?.cancel()
         val job = viewModelScope.launch {
-            val settings = settingsRepo.state.value
+            // A phone call is two people by definition. Telling Scribe so
+            // matters here more than anywhere: the caller comes through the
+            // loudspeaker, quieter than the user, and auto-detection tends to
+            // fold a quiet voice into the loud one.
+            val settings = settingsRepo.state.value.let { s ->
+                if (recordingsRepo.find(id)?.isPhoneCall == true && s.expectedSpeakers == 0) s.copy(expectedSpeakers = 2) else s
+            }
             val hasKey = settings.elevenLabsApiKey.isNotBlank()
             val audio = file?.takeIf { it.exists() && it.length() > 0L }
             val elevenLabsConfigured = hasKey && audio != null

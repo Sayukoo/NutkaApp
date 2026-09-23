@@ -36,11 +36,19 @@ class AudioRecorderManager(private val context: Context) {
      * Starts a session inside [directory], naming the file after [baseName]
      * plus whichever container actually worked.
      *
+     * @param audioSource [MediaRecorder.AudioSource.MIC] for dictation. Phone
+     *   calls must use [MediaRecorder.AudioSource.VOICE_RECOGNITION]: while a
+     *   call is active Android hands an ordinary app's MIC stream nothing but
+     *   silence, and the only exemption open to a non-system app is an enabled
+     *   accessibility service capturing from VOICE_RECOGNITION (see
+     *   AudioPolicyService::updateUidStates_l). VOICE_COMMUNICATION would be
+     *   doubly wrong — silenced too, and its echo canceller exists precisely
+     *   to erase the loudspeaker, i.e. the other person's voice.
      * @return the file being written to.
      * @throws Exception if no container could be prepared/started (mic busy,
      *   permission revoked, disk full, ...).
      */
-    fun start(directory: File, baseName: String): File {
+    fun start(directory: File, baseName: String, audioSource: Int = MediaRecorder.AudioSource.MIC): File {
         directory.mkdirs()
         val containers = listOf(
             MediaRecorder.OutputFormat.AAC_ADTS to "aac",
@@ -51,7 +59,7 @@ class AudioRecorderManager(private val context: Context) {
             val file = File(directory, "$baseName.$extension")
             val recorder = newRecorder()
             try {
-                recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                recorder.setAudioSource(audioSource)
                 recorder.setOutputFormat(format)
                 recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 recorder.setAudioEncodingBitRate(128_000)

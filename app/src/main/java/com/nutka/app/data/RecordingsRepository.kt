@@ -111,6 +111,7 @@ class RecordingsRepository private constructor(context: Context) {
         })
         put("speakerNames", JSONObject(r.speakerNames))
         put("errorMessage", r.errorMessage)
+        put("isPhoneCall", r.isPhoneCall)
     }
 
     private fun fromJson(o: JSONObject): Recording {
@@ -141,7 +142,8 @@ class RecordingsRepository private constructor(context: Context) {
             bookmarks = bookmarks,
             segments = segments,
             speakerNames = names,
-            errorMessage = o.optString("errorMessage", null.toString()).takeIf { o.has("errorMessage") && !o.isNull("errorMessage") }
+            errorMessage = o.optString("errorMessage", null.toString()).takeIf { o.has("errorMessage") && !o.isNull("errorMessage") },
+            isPhoneCall = o.optBoolean("isPhoneCall", false)
         )
     }
 

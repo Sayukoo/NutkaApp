@@ -63,6 +63,37 @@ status/text updates. A failed Notion send just reverts the recording to
 "Do wysłania" so the transcript stays visible and retryable, it never
 disappears.
 
+## Phone-call recording
+
+For recording calls you take part in (e.g. to keep track of what was agreed),
+with the other side's consent. Settings → **Rozmowy telefoniczne**.
+
+How it works on a stock, unrooted Pixel (Android 14/15), and why:
+
+- **An accessibility service is mandatory.** While a call is active Android
+  gives every ordinary app's microphone capture pure silence — MIC and
+  VOICE_COMMUNICATION alike (`AudioPolicyService::updateUidStates_l`). The
+  only exemption a non-system app can reach is being an enabled accessibility
+  service capturing from `VOICE_RECOGNITION` while in the foreground-service
+  state. `CallRecordingAccessibilityService` is that service: it reads no
+  screen content, it only detects call start/end (`READ_PHONE_STATE`). Enable
+  it under Settings → Accessibility → "Nutka — nagrywanie rozmów". Sideloaded
+  apps show it greyed out on Android 13+ until you allow it: Settings → Apps →
+  Nutka → ⋮ → "Allow restricted settings".
+- **The call must be on speaker.** The other person's voice is never
+  available as a stream (`VOICE_DOWNLINK` needs the privileged
+  `CAPTURE_AUDIO_OUTPUT`); the mic hears them only through the loudspeaker.
+  No app can switch the call's speaker on — Telecom owns the call's audio
+  route — so the recording notification warns when the speaker is off, and
+  also when the capture comes back as digital silence.
+- **Ask per call by default.** At the start of each call a notification offers
+  "Nagraj"; nothing is recorded unless tapped. "Nagrywaj każdą rozmowę"
+  records every call automatically — including people who don't know.
+- Recording stops by itself when the call ends. The file goes through the
+  same ElevenLabs pipeline as a dictation, with a two-speaker hint
+  (`num_speakers=2`) unless Settings sets an explicit count. As with a stop
+  from the notification, transcription starts once Nutka is open.
+
 ## Structure
 
 ```

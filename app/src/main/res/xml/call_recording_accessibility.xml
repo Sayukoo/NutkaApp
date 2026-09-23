@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Deliberately inert: no window content, no gestures, and events only from
+     Nutka's own windows (used as a cheap "the app was opened" signal). The
+     service exists for its accessibility status, not to observe anything. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/call_accessibility_description"
+    android:notificationTimeout="1000"
+    android:packageNames="com.nutka.app" />

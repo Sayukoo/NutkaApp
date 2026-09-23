@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Nutka</string>
+    <string name="call_accessibility_label">Nutka — nagrywanie rozmów</string>
+    <string name="call_accessibility_description">Pozwala Nutce nagrywać rozmowy telefoniczne, w których bierzesz udział. Android wpuszcza mikrofon w trakcie połączenia tylko do usług dostępności. Usługa nie czyta zawartości ekranu ani nie steruje telefonem — wykrywa jedynie początek i koniec rozmowy. Głos rozmówcy nagrywa się tylko przy włączonym głośniku.</string>
 </resources>

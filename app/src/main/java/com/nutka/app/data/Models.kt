@@ -19,5 +19,8 @@ data class Recording(
     val bookmarks: List<Int> = emptyList(),
     val segments: List<Segment> = emptyList(),
     val speakerNames: Map<String, String> = mapOf("a" to "Osoba 1", "b" to "Osoba 2"),
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    // Captured from a phone call (see CallRecordingAccessibilityService) rather
+    // than dictated — always two people, which the transcription uses as a hint.
+    val isPhoneCall: Boolean = false
 )
